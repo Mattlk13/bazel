@@ -14,15 +14,16 @@
 
 package com.google.devtools.build.lib.skyframe.serialization;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableClassToInstanceMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.MoreExecutors;
-import com.google.devtools.build.lib.bugreport.BugReport;
 import com.google.devtools.build.lib.skyframe.serialization.Memoizer.Serializer;
 import com.google.devtools.build.lib.skyframe.serialization.ObjectCodec.MemoizationStrategy;
 import com.google.devtools.build.lib.skyframe.serialization.SerializationException.NoCodecException;
@@ -44,7 +45,7 @@ import javax.annotation.Nullable;
  */
 public class SerializationContext {
   private final ObjectCodecRegistry registry;
-  private final ImmutableMap<Class<?>, Object> dependencies;
+  private final ImmutableClassToInstanceMap<Object> dependencies;
   @Nullable private final Memoizer.Serializer serializer;
   private final Set<Class<?>> explicitlyAllowedClasses;
   /** Initialized lazily. */
@@ -54,7 +55,7 @@ public class SerializationContext {
 
   private SerializationContext(
       ObjectCodecRegistry registry,
-      ImmutableMap<Class<?>, Object> dependencies,
+      ImmutableClassToInstanceMap<Object> dependencies,
       @Nullable Serializer serializer,
       boolean allowFuturesToBlockWritingOn) {
     this.registry = registry;
@@ -66,12 +67,12 @@ public class SerializationContext {
 
   @VisibleForTesting
   public SerializationContext(
-      ObjectCodecRegistry registry, ImmutableMap<Class<?>, Object> dependencies) {
+      ObjectCodecRegistry registry, ImmutableClassToInstanceMap<Object> dependencies) {
     this(registry, dependencies, /*serializer=*/ null, /*allowFuturesToBlockWritingOn=*/ false);
   }
 
   @VisibleForTesting
-  public SerializationContext(ImmutableMap<Class<?>, Object> dependencies) {
+  public SerializationContext(ImmutableClassToInstanceMap<Object> dependencies) {
     this(AutoRegistry.get(), dependencies);
   }
 
@@ -81,7 +82,7 @@ public class SerializationContext {
     serializeInternal(object, /*customMemoizationStrategy=*/ null, codedOut);
   }
 
-  public void serializeWithAdHocMemoizationStrategy(
+  void serializeWithAdHocMemoizationStrategy(
       Object object, MemoizationStrategy memoizationStrategy, CodedOutputStream codedOut)
       throws IOException, SerializationException {
     serializeInternal(object, memoizationStrategy, codedOut);
@@ -107,10 +108,8 @@ public class SerializationContext {
     }
   }
 
-  @SuppressWarnings("unchecked")
   public <T> T getDependency(Class<T> type) {
-    Preconditions.checkNotNull(type);
-    return (T) dependencies.get(type);
+    return checkNotNull(dependencies.getInstance(type), "Missing dependency of type %s", type);
   }
 
   /**
@@ -133,10 +132,8 @@ public class SerializationContext {
 
   @CheckReturnValue
   SerializationContext getMemoizingAndBlockingOnWriteContext() {
-    Preconditions.checkState(
-        serializer == null, "Should only be called on base serializationContext");
-    Preconditions.checkState(
-        !allowFuturesToBlockWritingOn, "Should only be called on base serializationContext");
+    checkState(serializer == null, "Should only be called on base serializationContext");
+    checkState(!allowFuturesToBlockWritingOn, "Should only be called on base serializationContext");
     return getNewMemoizingContext(/*allowFuturesToBlockWritingOn=*/ true);
   }
 
@@ -161,29 +158,18 @@ public class SerializationContext {
   /**
    * Register a {@link ListenableFuture} that must complete successfully before the serialized bytes
    * generated using this context can be written remotely. Failure of the future implies a bug or
-   * other unrecoverable error that should crash this JVM.
+   * other unrecoverable error that should crash this JVM, which is done by invoking {@link
+   * FutureCallback#onFailure} on the given {@code crashTerminatingCallback}.
    */
-  public void addFutureToBlockWritingOn(ListenableFuture<Void> future) {
-    Preconditions.checkState(allowFuturesToBlockWritingOn, "This context cannot block on a future");
+  public void addFutureToBlockWritingOn(
+      ListenableFuture<Void> future, FutureCallback<Void> crashTerminatingCallback) {
+    checkState(allowFuturesToBlockWritingOn, "This context cannot block on a future");
     if (futuresToBlockWritingOn == null) {
       futuresToBlockWritingOn = new ArrayList<>();
     }
     Futures.addCallback(future, crashTerminatingCallback, MoreExecutors.directExecutor());
     futuresToBlockWritingOn.add(future);
   }
-
-  private static final FutureCallback<Void> crashTerminatingCallback =
-      new FutureCallback<Void>() {
-        @Override
-        public void onSuccess(@Nullable Void result) {
-          // Do nothing.
-        }
-
-        @Override
-        public void onFailure(Throwable t) {
-          BugReport.handleCrash(t);
-        }
-      };
 
   /**
    * Creates a future that succeeds when all futures stored in this context via {@link
@@ -236,7 +222,7 @@ public class SerializationContext {
    * that know they may encounter an object that is expensive to serialize, like {@link
    * com.google.devtools.build.lib.skyframe.PackageValue} and {@link
    * com.google.devtools.build.lib.packages.Package} or {@link
-   * com.google.devtools.build.lib.skyframe.ConfiguredTargetValue} and {@link
+   * com.google.devtools.build.lib.analysis.ConfiguredTargetValue} and {@link
    * com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget}.
    *
    * <p>In case of an unexpected failure from {@link #checkClassExplicitlyAllowed}, it should first

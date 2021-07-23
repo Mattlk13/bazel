@@ -25,12 +25,13 @@ import com.google.devtools.build.lib.clock.BlazeClock;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.packages.BazelModuleContext;
 import com.google.devtools.build.lib.packages.ConstantRuleVisibility;
-import com.google.devtools.build.lib.packages.StarlarkSemanticsOptions;
+import com.google.devtools.build.lib.packages.semantics.BuildLanguageOptions;
 import com.google.devtools.build.lib.pkgcache.PackageOptions;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
 import com.google.devtools.build.lib.skyframe.BzlLoadFunction.BzlLoadFailedException;
 import com.google.devtools.build.lib.skyframe.util.SkyframeExecutorTestUtils;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
+import com.google.devtools.build.lib.vfs.DigestHashFunction;
 import com.google.devtools.build.lib.vfs.FileStatus;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.Path;
@@ -46,6 +47,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.UUID;
 import javax.annotation.Nullable;
+import net.starlark.java.eval.StarlarkInt;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -73,7 +75,7 @@ public class BzlLoadFunctionTest extends BuildViewTestCase {
                 ImmutableList.of(Root.fromPath(rootDirectory), Root.fromPath(alternativeRoot)),
                 BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY),
             packageOptions,
-            Options.getDefaults(StarlarkSemanticsOptions.class),
+            Options.getDefaults(BuildLanguageOptions.class),
             UUID.randomUUID(),
             ImmutableMap.<String, String>of(),
             new TimestampGranularityMonitor(BlazeClock.instance()));
@@ -401,11 +403,41 @@ public class BzlLoadFunctionTest extends BuildViewTestCase {
         SkyframeExecutorTestUtils.evaluate(
             getSkyframeExecutor(), skyKey, /*keepGoing=*/ false, reporter);
 
-    assertThat(result.get(skyKey).getModule().getGlobals()).containsEntry("a_symbol", 5);
+    assertThat(result.get(skyKey).getModule().getGlobals())
+        .containsEntry("a_symbol", StarlarkInt.of(5));
   }
 
   @Test
-  public void testErrorReadingBzlFileInlineIsTransient() throws Exception {
+  public void testBuiltinsInjectionFailure() throws Exception {
+    setBuildLanguageOptions("--experimental_builtins_bzl_path=tools/builtins_staging");
+    scratch.file(
+        "tools/builtins_staging/exports.bzl",
+        "1 // 0  # <-- dynamic error",
+        "exported_toplevels = {}",
+        "exported_rules = {}",
+        "exported_to_java = {}");
+    scratch.file("pkg/BUILD");
+    scratch.file("pkg/foo.bzl");
+    reporter.removeHandler(failFastHandler);
+
+    SkyKey key = key("//pkg:foo.bzl");
+    EvaluationResult<BzlLoadValue> result =
+        SkyframeExecutorTestUtils.evaluate(
+            getSkyframeExecutor(), key, /*keepGoing=*/ false, reporter);
+
+    assertContainsEvent(
+        "File \"/workspace/tools/builtins_staging/exports.bzl\", line 1, column 3, in <toplevel>");
+    assertContainsEvent("Error: integer division by zero");
+    Exception ex = result.getError(key).getException();
+    assertThat(ex)
+        .hasMessageThat()
+        .contains(
+            "Internal error while loading Starlark builtins for //pkg:foo.bzl: Failed to load"
+                + " builtins sources: initialization of module 'exports.bzl' (internal) failed");
+  }
+
+  @Test
+  public void testErrorReadingBzlFileIsTransientWhenUsingASTInlining() throws Exception {
     CustomInMemoryFs fs = (CustomInMemoryFs) fileSystem;
     scratch.file("a/BUILD");
     fs.badPathForRead = scratch.file("a/a1.bzl", "doesntmatter");
@@ -448,17 +480,21 @@ public class BzlLoadFunctionTest extends BuildViewTestCase {
     @Nullable private Path badPathForStat;
     @Nullable private Path badPathForRead;
 
+    CustomInMemoryFs() {
+      super(DigestHashFunction.SHA256);
+    }
+
     @Override
-    public FileStatus statIfFound(Path path, boolean followSymlinks) throws IOException {
-      if (path.equals(badPathForStat)) {
+    public FileStatus statIfFound(PathFragment path, boolean followSymlinks) throws IOException {
+      if (badPathForStat != null && badPathForStat.asFragment().equals(path)) {
         throw new IOException("bad");
       }
       return super.statIfFound(path, followSymlinks);
     }
 
     @Override
-    protected InputStream getInputStream(Path path) throws IOException {
-      if (path.equals(badPathForRead)) {
+    protected InputStream getInputStream(PathFragment path) throws IOException {
+      if (badPathForRead != null && badPathForRead.asFragment().equals(path)) {
         throw new IOException("bad");
       }
       return super.getInputStream(path);

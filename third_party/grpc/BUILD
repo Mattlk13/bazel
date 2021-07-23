@@ -14,11 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("//tools/distributions:distribution_rules.bzl", "distrib_java_import", "distrib_jar_filegroup")
+load("//tools/distributions:distribution_rules.bzl", "distrib_java_import", "distrib_jar_filegroup", "distrib_cc_binary")
 
 licenses(["notice"])  # Apache v2
 
-exports_files(["grpc_1.26.0.patch"])
+exports_files(["grpc_1.33.1.patch"])
 
 package(default_visibility = ["//visibility:public"])
 
@@ -32,14 +32,14 @@ filegroup(
 distrib_jar_filegroup(
     name = "bootstrap-grpc-jars",
     srcs = [
-        "grpc-api-1.26.0.jar",
-        "grpc-auth-1.26.0.jar",
-        "grpc-context-1.26.0.jar",
-        "grpc-core-1.26.0.jar",
-        "grpc-netty-1.26.0.jar",
-        "grpc-protobuf-1.26.0.jar",
-        "grpc-protobuf-lite-1.26.0.jar",
-        "grpc-stub-1.26.0.jar",
+        "grpc-api-1.33.1.jar",
+        "grpc-auth-1.33.1.jar",
+        "grpc-context-1.33.1.jar",
+        "grpc-core-1.33.1.jar",
+        "grpc-netty-1.33.1.jar",
+        "grpc-protobuf-1.33.1.jar",
+        "grpc-protobuf-lite-1.33.1.jar",
+        "grpc-stub-1.33.1.jar",
     ],
     enable_distributions = ["debian"],
 )
@@ -58,8 +58,9 @@ distrib_java_import(
     enable_distributions = ["debian"],
 )
 
-cc_binary(
+distrib_cc_binary(
     name = "grpc-java-plugin",
+    enable_distributions = ["debian"],
     srcs = [
         "compiler/src/java_plugin/cpp/java_generator.cpp",
         "compiler/src/java_plugin/cpp/java_generator.h",

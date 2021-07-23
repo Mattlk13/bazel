@@ -44,6 +44,8 @@ import com.google.devtools.build.lib.pkgcache.FilteringPolicies;
 import com.google.devtools.build.lib.pkgcache.FilteringPolicy;
 import com.google.devtools.build.lib.pkgcache.RecursivePackageProvider;
 import com.google.devtools.build.lib.pkgcache.TargetPatternResolverUtil;
+import com.google.devtools.build.lib.query2.engine.QueryException;
+import com.google.devtools.build.lib.server.FailureDetails.TargetPatterns;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -66,16 +68,19 @@ public class RecursivePackageProviderBackedTargetPatternResolver
   private final RecursivePackageProvider recursivePackageProvider;
   private final ExtendedEventHandler eventHandler;
   private final MultisetSemaphore<PackageIdentifier> packageSemaphore;
+  private final PackageIdentifierBatchingCallback.Factory packageIdentifierBatchingCallbackFactory;
 
   public RecursivePackageProviderBackedTargetPatternResolver(
       RecursivePackageProvider recursivePackageProvider,
       ExtendedEventHandler eventHandler,
       FilteringPolicy policy,
-      MultisetSemaphore<PackageIdentifier> packageSemaphore) {
+      MultisetSemaphore<PackageIdentifier> packageSemaphore,
+      PackageIdentifierBatchingCallback.Factory packageIdentifierBatchingCallbackFactory) {
     this.recursivePackageProvider = recursivePackageProvider;
     this.eventHandler = eventHandler;
     this.policy = policy;
     this.packageSemaphore = packageSemaphore;
+    this.packageIdentifierBatchingCallbackFactory = packageIdentifierBatchingCallbackFactory;
   }
 
   @Override
@@ -118,7 +123,7 @@ public class RecursivePackageProviderBackedTargetPatternResolver
           ? ResolvedTargets.of(target)
           : ResolvedTargets.empty();
     } catch (NoSuchThingException e) {
-      throw new TargetParsingException(e.getMessage(), e);
+      throw new TargetParsingException(e.getMessage(), e, e.getDetailedExitCode());
     }
   }
 
@@ -135,7 +140,7 @@ public class RecursivePackageProviderBackedTargetPatternResolver
     } catch (NoSuchThingException e) {
       String message = TargetPatternResolverUtil.getParsingErrorMessage(
           e.getMessage(), originalPattern);
-      throw new TargetParsingException(message, e);
+      throw new TargetParsingException(message, e, e.getDetailedExitCode());
     }
   }
 
@@ -178,7 +183,7 @@ public class RecursivePackageProviderBackedTargetPatternResolver
       final String originalPattern,
       String directory,
       boolean rulesOnly,
-      ImmutableSet<PathFragment> blacklistedSubdirectories,
+      ImmutableSet<PathFragment> forbiddenSubdirectories,
       ImmutableSet<PathFragment> excludedSubdirectories,
       BatchCallback<Target, E> callback,
       Class<E> exceptionClass)
@@ -189,7 +194,7 @@ public class RecursivePackageProviderBackedTargetPatternResolver
               originalPattern,
               directory,
               rulesOnly,
-              blacklistedSubdirectories,
+              forbiddenSubdirectories,
               excludedSubdirectories,
               callback,
               MoreExecutors.newDirectExecutorService())
@@ -206,7 +211,7 @@ public class RecursivePackageProviderBackedTargetPatternResolver
       String originalPattern,
       String directory,
       boolean rulesOnly,
-      ImmutableSet<PathFragment> blacklistedSubdirectories,
+      ImmutableSet<PathFragment> forbiddenSubdirectories,
       ImmutableSet<PathFragment> excludedSubdirectories,
       BatchCallback<Target, E> callback,
       Class<E> exceptionClass,
@@ -216,7 +221,7 @@ public class RecursivePackageProviderBackedTargetPatternResolver
         originalPattern,
         directory,
         rulesOnly,
-        blacklistedSubdirectories,
+        forbiddenSubdirectories,
         excludedSubdirectories,
         callback,
         executor);
@@ -227,7 +232,7 @@ public class RecursivePackageProviderBackedTargetPatternResolver
       String pattern,
       String directory,
       boolean rulesOnly,
-      ImmutableSet<PathFragment> blacklistedSubdirectories,
+      ImmutableSet<PathFragment> forbiddenSubdirectories,
       ImmutableSet<PathFragment> excludedSubdirectories,
       BatchCallback<Target, E> callback,
       ListeningExecutorService executor) {
@@ -243,16 +248,17 @@ public class RecursivePackageProviderBackedTargetPatternResolver
 
     PathFragment pathFragment;
     try (PackageIdentifierBatchingCallback batchingCallback =
-        new PackageIdentifierBatchingCallback(getPackageTargetsCallback, MAX_PACKAGES_BULK_GET)) {
+        packageIdentifierBatchingCallbackFactory.create(
+            getPackageTargetsCallback, MAX_PACKAGES_BULK_GET)) {
       pathFragment = TargetPatternResolverUtil.getPathFragment(directory);
       recursivePackageProvider.streamPackagesUnderDirectory(
           batchingCallback,
           eventHandler,
           repository,
           pathFragment,
-          blacklistedSubdirectories,
+          forbiddenSubdirectories,
           excludedSubdirectories);
-    } catch (TargetParsingException e) {
+    } catch (TargetParsingException | QueryException e) {
       return Futures.immediateFailedFuture(e);
     } catch (InterruptedException e) {
       return Futures.immediateCancelledFuture();
@@ -260,7 +266,9 @@ public class RecursivePackageProviderBackedTargetPatternResolver
 
     if (futures.isEmpty()) {
       return Futures.immediateFailedFuture(
-          new TargetParsingException("no targets found beneath '" + pathFragment + "'"));
+          new TargetParsingException(
+              "no targets found beneath '" + pathFragment + "'",
+              TargetPatterns.Code.TARGETS_MISSING));
     }
 
     return Futures.whenAllSucceed(futures).call(() -> null, directExecutor());
@@ -301,11 +309,14 @@ public class RecursivePackageProviderBackedTargetPatternResolver
         for (Collection<Target> targets : resolvedTargets) {
           filteredTargets.addAll(targets);
         }
-        // TODO(bazel-core): Invoking the callback while holding onto the package
-        // semaphore can lead to deadlocks. Also, if the semaphore has a small count,
-        // acquireAll can also lead to problems if we don't batch appropriately.
-        // Although we default to an unbounded semaphore for SkyQuery and this is an
-        // unreported issue, consider refactoring so that the code is strictly correct.
+        // TODO(b/121277360): Invoking the callback while holding onto the package
+        // semaphore can lead to deadlocks.
+        //
+        // Also, if the semaphore has a small count, acquireAll can also lead to problems if we
+        // don't batch appropriately. Note: We default to an unbounded semaphore for SkyQuery.
+        //
+        // TODO(b/168142585): Make this code strictly correct in the situation where the semaphore
+        // is bounded.
         callback.process(filteredTargets);
       } finally {
         packageSemaphore.releaseAll(pkgIdBatchSet);

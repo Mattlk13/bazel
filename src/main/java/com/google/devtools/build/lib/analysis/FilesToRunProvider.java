@@ -22,7 +22,7 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
-import com.google.devtools.build.lib.skylarkbuildapi.FilesToRunProviderApi;
+import com.google.devtools.build.lib.starlarkbuildapi.FilesToRunProviderApi;
 import javax.annotation.Nullable;
 
 /** Returns information about executables produced by a target and the files needed to run it. */
@@ -94,7 +94,7 @@ public final class FilesToRunProvider
   /** Return a {@link RunfilesSupplier} encapsulating runfiles for this tool. */
   public RunfilesSupplier getRunfilesSupplier() {
     if (runfilesSupport != null) {
-      return RunfilesSupplierImpl.create(runfilesSupport);
+      return SingleRunfilesSupplier.create(runfilesSupport);
     } else {
       return EmptyRunfilesSupplier.INSTANCE;
     }

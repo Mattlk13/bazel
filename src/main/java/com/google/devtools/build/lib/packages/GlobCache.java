@@ -20,9 +20,11 @@ import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.util.concurrent.SettableFuture;
+import com.google.devtools.build.lib.actions.ThreadStateReceiver;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.concurrent.ThreadSafety;
 import com.google.devtools.build.lib.packages.Globber.BadGlobException;
+import com.google.devtools.build.lib.profiler.SilentCloseable;
 import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -72,10 +74,9 @@ public class GlobCache {
    */
   private final Predicate<Path> childDirectoryPredicate;
 
-  /**
-   * System call caching layer.
-   */
-  private AtomicReference<? extends UnixGlob.FilesystemCalls> syscalls;
+  /** System call caching layer. */
+  private final AtomicReference<? extends UnixGlob.FilesystemCalls> syscalls;
+
   private final int maxDirectoriesToEagerlyVisit;
 
   /** The thread pool for glob evaluation. */
@@ -102,10 +103,19 @@ public class GlobCache {
       final CachingPackageLocator locator,
       AtomicReference<? extends UnixGlob.FilesystemCalls> syscalls,
       Executor globExecutor,
-      int maxDirectoriesToEagerlyVisit) {
+      int maxDirectoriesToEagerlyVisit,
+      ThreadStateReceiver threadStateReceiverForMetrics) {
     this.packageDirectory = Preconditions.checkNotNull(packageDirectory);
     this.packageId = Preconditions.checkNotNull(packageId);
-    this.globExecutor = Preconditions.checkNotNull(globExecutor);
+    Preconditions.checkNotNull(globExecutor);
+    this.globExecutor =
+        command ->
+            globExecutor.execute(
+                () -> {
+                  try (SilentCloseable ignored = threadStateReceiverForMetrics.started()) {
+                    command.run();
+                  }
+                });
     this.syscalls = syscalls == null ? new AtomicReference<>(UnixGlob.DEFAULT_SYSCALLS) : syscalls;
     this.maxDirectoriesToEagerlyVisit = maxDirectoriesToEagerlyVisit;
 
@@ -260,7 +270,9 @@ public class GlobCache {
         throw new BadGlobException(
             "glob pattern '"
                 + pattern
-                + "' didn't match anything, but allow_empty is set to False.");
+                + "' didn't match anything, but allow_empty is set to False "
+                + "(the default value of allow_empty can be set with "
+                + "--incompatible_disallow_empty_glob).");
       }
       results.addAll(items);
     }
@@ -271,7 +283,9 @@ public class GlobCache {
     }
     if (!allowEmpty && results.isEmpty()) {
       throw new BadGlobException(
-          "all files in the glob have been excluded, but allow_empty is set to False.");
+          "all files in the glob have been excluded, but allow_empty is set to False "
+              + "(the default value of allow_empty can be set with "
+              + "--incompatible_disallow_empty_glob).");
     }
     return new ArrayList<>(results);
   }

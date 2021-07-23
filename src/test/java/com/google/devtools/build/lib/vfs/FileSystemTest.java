@@ -406,7 +406,7 @@ public abstract class FileSystemTest {
   @Test
   public void testSymbolicFileLinkExists() throws Exception {
     Path someLink = absolutize("some-link");
-    if (testFS.supportsSymbolicLinksNatively(someLink)) {
+    if (testFS.supportsSymbolicLinksNatively(someLink.asFragment())) {
       someLink.createSymbolicLink(xFile);
       assertThat(someLink.exists()).isTrue();
       assertThat(someLink.statIfFound()).isNotNull();
@@ -416,7 +416,7 @@ public abstract class FileSystemTest {
   @Test
   public void testSymbolicFileLinkIsSymbolicLink() throws Exception {
     Path someLink = absolutize("some-link");
-    if (testFS.supportsSymbolicLinksNatively(someLink)) {
+    if (testFS.supportsSymbolicLinksNatively(someLink.asFragment())) {
       someLink.createSymbolicLink(xFile);
       assertThat(someLink.isSymbolicLink()).isTrue();
     }
@@ -425,7 +425,7 @@ public abstract class FileSystemTest {
   @Test
   public void testSymbolicFileLinkIsFile() throws Exception {
     Path someLink = absolutize("some-link");
-    if (testFS.supportsSymbolicLinksNatively(someLink)) {
+    if (testFS.supportsSymbolicLinksNatively(someLink.asFragment())) {
       someLink.createSymbolicLink(xFile);
       assertThat(someLink.isFile()).isTrue();
     }
@@ -434,7 +434,7 @@ public abstract class FileSystemTest {
   @Test
   public void testSymbolicFileLinkIsNotDirectory() throws Exception {
     Path someLink = absolutize("some-link");
-    if (testFS.supportsSymbolicLinksNatively(someLink)) {
+    if (testFS.supportsSymbolicLinksNatively(someLink.asFragment())) {
       someLink.createSymbolicLink(xFile);
       assertThat(someLink.isDirectory()).isFalse();
     }
@@ -443,7 +443,7 @@ public abstract class FileSystemTest {
   @Test
   public void testSymbolicDirLinkExists() throws Exception {
     Path someLink = absolutize("some-link");
-    if (testFS.supportsSymbolicLinksNatively(someLink)) {
+    if (testFS.supportsSymbolicLinksNatively(someLink.asFragment())) {
       someLink.createSymbolicLink(xEmptyDirectory);
       assertThat(someLink.exists()).isTrue();
       assertThat(someLink.statIfFound()).isNotNull();
@@ -453,7 +453,7 @@ public abstract class FileSystemTest {
   @Test
   public void testSymbolicDirLinkIsSymbolicLink() throws Exception {
     Path someLink = absolutize("some-link");
-    if (testFS.supportsSymbolicLinksNatively(someLink)) {
+    if (testFS.supportsSymbolicLinksNatively(someLink.asFragment())) {
       someLink.createSymbolicLink(xEmptyDirectory);
       assertThat(someLink.isSymbolicLink()).isTrue();
     }
@@ -462,7 +462,7 @@ public abstract class FileSystemTest {
   @Test
   public void testSymbolicDirLinkIsDirectory() throws Exception {
     Path someLink = absolutize("some-link");
-    if (testFS.supportsSymbolicLinksNatively(someLink)) {
+    if (testFS.supportsSymbolicLinksNatively(someLink.asFragment())) {
       someLink.createSymbolicLink(xEmptyDirectory);
       assertThat(someLink.isDirectory()).isTrue();
     }
@@ -471,7 +471,7 @@ public abstract class FileSystemTest {
   @Test
   public void testSymbolicDirLinkIsNotFile() throws Exception {
     Path someLink = absolutize("some-link");
-    if (testFS.supportsSymbolicLinksNatively(someLink)) {
+    if (testFS.supportsSymbolicLinksNatively(someLink.asFragment())) {
       someLink.createSymbolicLink(xEmptyDirectory);
       assertThat(someLink.isFile()).isFalse();
     }
@@ -651,6 +651,64 @@ public abstract class FileSystemTest {
     Path wrongPath = absolutize("some-file/new-file");
     IOException e = assertThrows(IOException.class, () -> wrongPath.createDirectory());
     assertThat(e).hasMessageThat().endsWith(" (Not a directory)");
+  }
+
+  @Test
+  public void testCreateWritableDirectoryCreatesNewDirectory() throws Exception {
+    Path dir = absolutize("dir");
+
+    boolean result = dir.createWritableDirectory();
+
+    assertThat(result).isTrue();
+    assertThat(dir.isReadable()).isTrue();
+    assertThat(dir.isWritable()).isTrue();
+    assertThat(dir.isExecutable()).isTrue();
+    assertThat(dir.isDirectory(Symlinks.NOFOLLOW)).isTrue();
+  }
+
+  @Test
+  public void testCreateWritableDirectoryUpdatesPermissions() throws Exception {
+    Path dir = absolutize("dir");
+    dir.createDirectory();
+    dir.setWritable(false);
+    dir.setReadable(false);
+
+    boolean result = dir.createWritableDirectory();
+
+    assertThat(result).isFalse();
+    assertThat(dir.isReadable()).isTrue();
+    assertThat(dir.isWritable()).isTrue();
+    assertThat(dir.isExecutable()).isTrue();
+    assertThat(dir.isDirectory(Symlinks.NOFOLLOW)).isTrue();
+  }
+
+  @Test
+  public void testCreateWritableDirectoryUnderNonExistentParentFails() throws Exception {
+    Path dir = absolutize("nonexistent/dir");
+    assertThrows(FileNotFoundException.class, dir::createWritableDirectory);
+  }
+
+  @Test
+  public void testCreateWritableDirectoryOverExistingFileFails() throws Exception {
+    Path file = absolutize("file");
+    FileSystemUtils.createEmptyFile(file);
+    file.setExecutable(false);
+
+    IOException e = assertThrows(IOException.class, file::createWritableDirectory);
+
+    assertThat(e).hasMessageThat().isEqualTo(file + " (Not a directory)");
+    assertThat(file.isExecutable()).isFalse();
+  }
+
+  @Test
+  public void testCreateWritableDirectoryUnderExistingFileFails() throws Exception {
+    Path file = absolutize("file");
+    FileSystemUtils.createEmptyFile(file);
+    Path dir = absolutize("file/dir");
+
+    IOException e = assertThrows(IOException.class, dir::createWritableDirectory);
+
+    assertThat(e).hasMessageThat().endsWith("(Not a directory)");
   }
 
   // Test directory contents
@@ -1589,7 +1647,7 @@ public abstract class FileSystemTest {
     Path xNonEmptyDirectoryBar = xNonEmptyDirectory.getChild("bar");
     xNonEmptyDirectory.setWritable(false);
 
-    if (testFS.supportsSymbolicLinksNatively(xNonEmptyDirectoryBar)) {
+    if (testFS.supportsSymbolicLinksNatively(xNonEmptyDirectoryBar.asFragment())) {
       IOException e =
           assertThrows(
               IOException.class,
@@ -1631,34 +1689,34 @@ public abstract class FileSystemTest {
 
   @Test
   public void testResolveSymlinks() throws Exception {
-    if (testFS.supportsSymbolicLinksNatively(xLink)) {
+    if (testFS.supportsSymbolicLinksNatively(xLink.asFragment())) {
       createSymbolicLink(xLink, xFile);
       FileSystemUtils.createEmptyFile(xFile);
-      assertThat(testFS.resolveOneLink(xLink)).isEqualTo(xFile.asFragment());
+      assertThat(testFS.resolveOneLink(xLink.asFragment())).isEqualTo(xFile.asFragment());
       assertThat(xLink.resolveSymbolicLinks()).isEqualTo(xFile);
     }
   }
 
   @Test
   public void testResolveDanglingSymlinks() throws Exception {
-    if (testFS.supportsSymbolicLinksNatively(xLink)) {
+    if (testFS.supportsSymbolicLinksNatively(xLink.asFragment())) {
       createSymbolicLink(xLink, xNothing);
-      assertThat(testFS.resolveOneLink(xLink)).isEqualTo(xNothing.asFragment());
+      assertThat(testFS.resolveOneLink(xLink.asFragment())).isEqualTo(xNothing.asFragment());
       assertThrows(IOException.class, () -> xLink.resolveSymbolicLinks());
     }
   }
 
   @Test
   public void testResolveNonSymlinks() throws Exception {
-    if (testFS.supportsSymbolicLinksNatively(xFile)) {
-      assertThat(testFS.resolveOneLink(xFile)).isNull();
+    if (testFS.supportsSymbolicLinksNatively(xFile.asFragment())) {
+      assertThat(testFS.resolveOneLink(xFile.asFragment())).isNull();
       assertThat(xFile.resolveSymbolicLinks()).isEqualTo(xFile);
     }
   }
 
   @Test
-  public void testCreateHardLink_Success() throws Exception {
-    if (!testFS.supportsHardLinksNatively(xFile)) {
+  public void testCreateHardLink_success() throws Exception {
+    if (!testFS.supportsHardLinksNatively(xFile.asFragment())) {
       return;
     }
     xFile.createHardLink(xLink);
@@ -1670,8 +1728,8 @@ public abstract class FileSystemTest {
   }
 
   @Test
-  public void testCreateHardLink_NeitherOriginalNorLinkExists() throws Exception {
-    if (!testFS.supportsHardLinksNatively(xFile)) {
+  public void testCreateHardLink_neitherOriginalNorLinkExists() throws Exception {
+    if (!testFS.supportsHardLinksNatively(xFile.asFragment())) {
       return;
     }
 
@@ -1687,9 +1745,9 @@ public abstract class FileSystemTest {
   }
 
   @Test
-  public void testCreateHardLink_OriginalDoesNotExistAndLinkExists() throws Exception {
+  public void testCreateHardLink_originalDoesNotExistAndLinkExists() throws Exception {
 
-    if (!testFS.supportsHardLinksNatively(xFile)) {
+    if (!testFS.supportsHardLinksNatively(xFile.asFragment())) {
       return;
     }
 
@@ -1707,9 +1765,9 @@ public abstract class FileSystemTest {
   }
 
   @Test
-  public void testCreateHardLink_BothOriginalAndLinkExist() throws Exception {
+  public void testCreateHardLink_bothOriginalAndLinkExist() throws Exception {
 
-    if (!testFS.supportsHardLinksNatively(xFile)) {
+    if (!testFS.supportsHardLinksNatively(xFile.asFragment())) {
       return;
     }
     /* Both original file and link file exist */
@@ -1724,6 +1782,7 @@ public abstract class FileSystemTest {
   }
 
   protected boolean isHardLinked(Path a, Path b) throws IOException {
-    return testFS.stat(a, false).getNodeId() == testFS.stat(b, false).getNodeId();
+    return testFS.stat(a.asFragment(), false).getNodeId()
+        == testFS.stat(b.asFragment(), false).getNodeId();
   }
 }

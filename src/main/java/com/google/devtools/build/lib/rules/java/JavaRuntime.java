@@ -17,10 +17,8 @@ package com.google.devtools.build.lib.rules.java;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import com.google.common.collect.ImmutableMap;
-import com.google.devtools.build.lib.actions.Actions;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
-import com.google.devtools.build.lib.analysis.CompilationHelper;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.PrerequisiteArtifacts;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
@@ -29,8 +27,8 @@ import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
 import com.google.devtools.build.lib.analysis.TemplateVariableInfo;
-import com.google.devtools.build.lib.analysis.TransitionMode;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.platform.ToolchainInfo;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
@@ -46,16 +44,10 @@ public class JavaRuntime implements RuleConfiguredTargetFactory {
   @Override
   public ConfiguredTarget create(RuleContext ruleContext)
       throws InterruptedException, RuleErrorException, ActionConflictException {
-    JavaCommon.checkRuleLoadedThroughMacro(ruleContext);
     NestedSetBuilder<Artifact> filesBuilder = NestedSetBuilder.stableOrder();
     BuildConfiguration configuration = checkNotNull(ruleContext.getConfiguration());
-    filesBuilder.addTransitive(
-        PrerequisiteArtifacts.nestedSet(ruleContext, "srcs", TransitionMode.TARGET));
-    boolean siblingRepositoryLayout =
-        ruleContext
-            .getAnalysisEnvironment()
-            .getStarlarkSemantics()
-            .experimentalSiblingRepositoryLayout();
+    filesBuilder.addTransitive(PrerequisiteArtifacts.nestedSet(ruleContext, "srcs"));
+    boolean siblingRepositoryLayout = configuration.isSiblingRepositoryLayout();
     PathFragment javaHome = defaultJavaHome(ruleContext.getLabel(), siblingRepositoryLayout);
     if (ruleContext.attributes().isAttributeValueExplicitlySpecified("java_home")) {
       PathFragment javaHomeAttribute =
@@ -75,7 +67,7 @@ public class JavaRuntime implements RuleConfiguredTargetFactory {
     PathFragment javaBinaryRunfilesPath =
         getRunfilesJavaExecutable(javaHome, ruleContext.getLabel());
 
-    Artifact java = ruleContext.getPrerequisiteArtifact("java", TransitionMode.TARGET);
+    Artifact java = ruleContext.getPrerequisiteArtifact("java");
     if (java != null) {
       if (javaHome.isAbsolute()) {
         ruleContext.ruleError("'java_home' with an absolute path requires 'java' to be empty.");
@@ -95,11 +87,6 @@ public class JavaRuntime implements RuleConfiguredTargetFactory {
         javaBinaryRunfilesPath.getParentDirectory().getParentDirectory();
 
     NestedSet<Artifact> filesToBuild = filesBuilder.build();
-    NestedSet<Artifact> middleman =
-        configuration.enableAggregatingMiddleman()
-            ? CompilationHelper.getAggregatingMiddleman(
-                ruleContext, Actions.escapeLabel(ruleContext.getLabel()), filesToBuild)
-            : filesToBuild;
 
     // TODO(cushon): clean up uses of java_runtime in data deps and remove this
     Runfiles runfiles =
@@ -110,7 +97,6 @@ public class JavaRuntime implements RuleConfiguredTargetFactory {
     JavaRuntimeInfo javaRuntime =
         JavaRuntimeInfo.create(
             filesToBuild,
-            middleman,
             javaHome,
             javaBinaryExecPath,
             javaHomeRunfilesPath,
@@ -123,11 +109,15 @@ public class JavaRuntime implements RuleConfiguredTargetFactory {
                 "JAVABASE", javaHome.getPathString()),
             ruleContext.getRule().getLocation());
 
+    ToolchainInfo toolchainInfo =
+        new ToolchainInfo(
+            ImmutableMap.<String, Object>builder().put("java_runtime", javaRuntime).build());
     return new RuleConfiguredTargetBuilder(ruleContext)
         .addProvider(RunfilesProvider.class, RunfilesProvider.simple(runfiles))
         .setFilesToBuild(filesToBuild)
         .addNativeDeclaredProvider(javaRuntime)
         .addNativeDeclaredProvider(templateVariableInfo)
+        .addNativeDeclaredProvider(toolchainInfo)
         .build();
   }
 
@@ -137,18 +127,17 @@ public class JavaRuntime implements RuleConfiguredTargetFactory {
   }
 
   static PathFragment defaultJavaHome(Label javabase, boolean siblingRepositoryLayout) {
-    if (javabase.getPackageIdentifier().getRepository().isDefault()) {
+    if (javabase.getRepository().isDefault()) {
       return javabase.getPackageFragment();
     }
     return javabase.getPackageIdentifier().getExecPath(siblingRepositoryLayout);
   }
 
   private static PathFragment getRunfilesJavaExecutable(PathFragment javaHome, Label javabase) {
-    if (javaHome.isAbsolute() || javabase.getPackageIdentifier().getRepository().isMain()) {
+    if (javaHome.isAbsolute() || javabase.getRepository().isMain()) {
       return javaHome.getRelative(BIN_JAVA);
     } else {
       return javabase
-          .getPackageIdentifier()
           .getRepository()
           .getRunfilesPath()
           .getRelative(BIN_JAVA);

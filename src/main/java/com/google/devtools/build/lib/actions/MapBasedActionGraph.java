@@ -14,25 +14,26 @@
 
 package com.google.devtools.build.lib.actions;
 
-import com.google.common.base.Preconditions;
 import com.google.devtools.build.lib.actions.Artifact.OwnerlessArtifactWrapper;
-import com.google.devtools.build.lib.events.EventHandler;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
-/**
- * An action graph that resolves generating actions by looking them up in a map.
- */
+/** An action graph that resolves generating actions by looking them up in a map. */
 @ThreadSafe
 public final class MapBasedActionGraph implements MutableActionGraph {
-  private final EventHandler eventHandler;
-  private final ActionKeyContext actionKeyContext;
-  private final ConcurrentMultimapWithHeadElement<OwnerlessArtifactWrapper, ActionAnalysisMetadata>
-      generatingActionMap = new ConcurrentMultimapWithHeadElement<>();
 
-  public MapBasedActionGraph(EventHandler eventHandler, ActionKeyContext actionKeyContext) {
-    this.eventHandler = eventHandler;
+  private final ActionKeyContext actionKeyContext;
+  private final ConcurrentMap<OwnerlessArtifactWrapper, ActionAnalysisMetadata> generatingActionMap;
+
+  public MapBasedActionGraph(ActionKeyContext actionKeyContext) {
+    this(actionKeyContext, /*sizeHint=*/ 16);
+  }
+
+  public MapBasedActionGraph(ActionKeyContext actionKeyContext, int sizeHint) {
     this.actionKeyContext = actionKeyContext;
+    this.generatingActionMap = new ConcurrentHashMap<>(sizeHint);
   }
 
   @Override
@@ -42,38 +43,22 @@ public final class MapBasedActionGraph implements MutableActionGraph {
   }
 
   @Override
-  public void registerAction(ActionAnalysisMetadata action) throws ActionConflictException {
+  public void registerAction(ActionAnalysisMetadata action)
+      throws ActionConflictException, InterruptedException {
     for (Artifact artifact : action.getOutputs()) {
-      OwnerlessArtifactWrapper wrapper = new OwnerlessArtifactWrapper(artifact);
-      ActionAnalysisMetadata previousAction = generatingActionMap.putAndGet(wrapper, action);
-      if (previousAction != null
-          && previousAction != action
-          && !Actions.canBeSharedWarnForPotentialFalsePositives(
-              eventHandler, actionKeyContext, action, previousAction)) {
-        generatingActionMap.remove(wrapper, action);
+      ActionAnalysisMetadata previousAction =
+          generatingActionMap.putIfAbsent(new OwnerlessArtifactWrapper(artifact), action);
+      if (previousAction != null && previousAction != action) {
+        if (Actions.canBeSharedLogForPotentialFalsePositives(
+            actionKeyContext, action, previousAction)) {
+          return; // All outputs can be shared. No need to register the remaining outputs.
+        }
         throw new ActionConflictException(actionKeyContext, artifact, previousAction, action);
       }
     }
   }
 
-  @Override
-  public void unregisterAction(ActionAnalysisMetadata action) {
-    for (Artifact artifact : action.getOutputs()) {
-      OwnerlessArtifactWrapper wrapper = new OwnerlessArtifactWrapper(artifact);
-      generatingActionMap.remove(wrapper, action);
-      ActionAnalysisMetadata otherAction = generatingActionMap.get(wrapper);
-      Preconditions.checkState(
-          otherAction == null
-              || (otherAction != action
-                  && Actions.canBeShared(actionKeyContext, action, otherAction)),
-          "%s %s",
-          action,
-          otherAction);
-    }
-  }
-
-  @Override
-  public void clear() {
-    generatingActionMap.clear();
+  public int getSize() {
+    return generatingActionMap.size();
   }
 }

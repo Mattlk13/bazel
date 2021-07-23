@@ -26,20 +26,20 @@ import com.google.devtools.build.lib.actions.Actions.GeneratingActions;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.config.CoreOptions;
-import com.google.devtools.build.lib.analysis.config.CoreOptions.IncludeConfigFragmentsEnum;
 import com.google.devtools.build.lib.analysis.starlark.StarlarkApiProvider;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.packages.Info;
 import com.google.devtools.build.lib.packages.Provider;
-import com.google.devtools.build.lib.syntax.EvalException;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.TreeMap;
 import javax.annotation.Nullable;
+import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.Starlark;
 
 /**
  * Extra information about a configured target computed on request of a dependent.
@@ -192,8 +192,10 @@ public final class ConfiguredAspect implements ProviderCollection {
     public Builder addStarlarkDeclaredProvider(Info declaredProvider) throws EvalException {
       Provider constructor = declaredProvider.getProvider();
       if (!constructor.isExported()) {
-        throw new EvalException(
-            constructor.getLocation(), "All providers must be top level values");
+        throw Starlark.errorf(
+            "aspect function returned an instance of a provider (defined at %s) that is not a"
+                + " global",
+            constructor.getLocation());
       }
       addDeclaredProvider(declaredProvider);
       return this;
@@ -219,7 +221,7 @@ public final class ConfiguredAspect implements ProviderCollection {
       return this;
     }
 
-    public ConfiguredAspect build() throws ActionConflictException {
+    public ConfiguredAspect build() throws ActionConflictException, InterruptedException {
       if (!outputGroupBuilders.isEmpty()) {
         ImmutableMap.Builder<String, NestedSet<Artifact>> outputGroups = ImmutableMap.builder();
         for (Map.Entry<String, NestedSetBuilder<Artifact>> entry : outputGroupBuilders.entrySet()) {
@@ -241,7 +243,6 @@ public final class ConfiguredAspect implements ProviderCollection {
       AnalysisEnvironment analysisEnvironment = ruleContext.getAnalysisEnvironment();
       GeneratingActions generatingActions =
           Actions.assignOwnersAndFilterSharedActionsAndThrowActionConflict(
-              analysisEnvironment.getEventHandler(),
               analysisEnvironment.getActionKeyContext(),
               analysisEnvironment.getRegisteredActions(),
               ruleContext.getOwner(),
@@ -257,18 +258,13 @@ public final class ConfiguredAspect implements ProviderCollection {
      * CoreOptions#includeRequiredConfigFragmentsProvider} isn't {@link
      * CoreOptions.IncludeConfigFragmentsEnum#OFF}.
      *
-     * <p>See {@link ConfiguredTargetFactory#getRequiredConfigFragments} for a description of the
-     * meaning of this provider's content. That method populates the results of {@link
-     * RuleContext#getRequiredConfigFragments} and {@link
+     * <p>See {@link com.google.devtools.build.lib.analysis.config.RequiredFragmentsUtil} for a
+     * description of the meaning of this provider's content. That class contains methods that
+     * populate the results of {@link RuleContext#getRequiredConfigFragments} and {@link
      * #aspectImplSpecificRequiredConfigFragments}.
      */
     private void maybeAddRequiredConfigFragmentsProvider() {
-      if (ruleContext
-              .getConfiguration()
-              .getOptions()
-              .get(CoreOptions.class)
-              .includeRequiredConfigFragmentsProvider
-          != IncludeConfigFragmentsEnum.OFF) {
+      if (ruleContext.shouldIncludeRequiredConfigFragmentsProvider()) {
         addProvider(
             new RequiredConfigFragmentsProvider(
                 ImmutableSet.<String>builder()

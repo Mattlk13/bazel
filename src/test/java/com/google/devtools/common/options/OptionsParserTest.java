@@ -15,6 +15,7 @@
 package com.google.devtools.common.options;
 
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.common.truth.Truth8.assertThat;
 import static java.util.Arrays.asList;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.fail;
@@ -1871,6 +1872,10 @@ public class OptionsParserTest {
     parser.parse("--old_name=foo");
     OldNameExample result = parser.getOptions(OldNameExample.class);
     assertThat(result.flag).isEqualTo("foo");
+    // Using old option name should cause a warning
+    assertThat(parser.getWarnings())
+        .contains("Option 'old_name' is deprecated: Use --new_name instead");
+    assertThat(parser.getWarnings()).containsNoDuplicates();
 
     // Should also work by its new name.
     parser = OptionsParser.builder().optionsClasses(OldNameExample.class).build();
@@ -1879,6 +1884,18 @@ public class OptionsParserTest {
     assertThat(result.flag).isEqualTo("foo");
     // Should be no warnings if the new name is used.
     assertThat(parser.getWarnings()).isEmpty();
+  }
+
+  @Test
+  public void testOldName_repeatedFlag() throws OptionsParsingException {
+    OptionsParser parser = OptionsParser.builder().optionsClasses(OldNameExample.class).build();
+    parser.parse("--old_name=foo", "--old_name=bar");
+    OldNameExample result = parser.getOptions(OldNameExample.class);
+    assertThat(result.flag).isEqualTo("bar");
+    // Using old option name should cause a warning
+    assertThat(parser.getWarnings())
+        .contains("Option 'old_name' is deprecated: Use --new_name instead");
+    assertThat(parser.getWarnings()).containsNoDuplicates();
   }
 
   @Test
@@ -2160,5 +2177,142 @@ public class OptionsParserTest {
     parser.visitOptions(predicate, visitor);
 
     return names;
+  }
+
+  @Test
+  public void setOptionValueAtSpecificPriorityWithoutExpansion_setsOptionAndAddsParsedValue()
+      throws Exception {
+    OptionsParser parser = OptionsParser.builder().optionsClasses(ExampleFoo.class).build();
+    OptionInstanceOrigin origin =
+        new OptionInstanceOrigin(
+            OptionPriority.lowestOptionPriorityAtCategory(PriorityCategory.INVOCATION_POLICY),
+            "invocation policy",
+            /*implicitDependent=*/ null,
+            /*expandedFrom=*/ null);
+    OptionDefinition optionDefinition =
+        OptionDefinition.extractOptionDefinition(ExampleFoo.class.getField("foo"));
+
+    parser.setOptionValueAtSpecificPriorityWithoutExpansion(origin, optionDefinition, "hello");
+
+    assertThat(parser.getOptions(ExampleFoo.class).foo).isEqualTo("hello");
+    assertThat(
+            parser.asCompleteListOfParsedOptions().stream()
+                .map(ParsedOptionDescription::getCommandLineForm))
+        .containsExactly("--foo=hello");
+  }
+
+  @Test
+  public void setOptionValueAtSpecificPriorityWithoutExpansion_addsFlagAlias() throws Exception {
+    OptionsParser parser =
+        OptionsParser.builder().withAliasFlag("foo").optionsClasses(ExampleFoo.class).build();
+    OptionInstanceOrigin origin =
+        new OptionInstanceOrigin(
+            OptionPriority.lowestOptionPriorityAtCategory(PriorityCategory.INVOCATION_POLICY),
+            "invocation policy",
+            /*implicitDependent=*/ null,
+            /*expandedFrom=*/ null);
+    OptionDefinition optionDefinition =
+        OptionDefinition.extractOptionDefinition(ExampleFoo.class.getField("foo"));
+
+    parser.setOptionValueAtSpecificPriorityWithoutExpansion(origin, optionDefinition, "hi=bar");
+    parser.parse("--hi=123");
+
+    assertThat(parser.getOptions(ExampleFoo.class).foo).isEqualTo("hi=bar");
+    assertThat(parser.getOptions(ExampleFoo.class).bar).isEqualTo(123);
+    assertThat(
+            parser.asCompleteListOfParsedOptions().stream()
+                .map(ParsedOptionDescription::getCommandLineForm))
+        .containsExactly("--bar=123", "--foo=hi=bar")
+        .inOrder();
+  }
+
+  @Test
+  public void setOptionValueAtSpecificPriorityWithoutExpansion_implicitReqs_setsTopFlagOnly()
+      throws Exception {
+    OptionsParser parser =
+        OptionsParser.builder().optionsClasses(ImplicitDependencyOptions.class).build();
+    OptionInstanceOrigin origin = createInvocationPolicyOrigin();
+    OptionDefinition optionDefinition =
+        OptionDefinition.extractOptionDefinition(ImplicitDependencyOptions.class.getField("first"));
+
+    parser.setOptionValueAtSpecificPriorityWithoutExpansion(origin, optionDefinition, "hello");
+
+    ImplicitDependencyOptions options = parser.getOptions(ImplicitDependencyOptions.class);
+    assertThat(options.first).isEqualTo("hello");
+    assertThat(options.second).isNull();
+    assertThat(options.third).isNull();
+    assertThat(
+            parser.asCompleteListOfParsedOptions().stream()
+                .map(ParsedOptionDescription::getCommandLineForm))
+        .containsExactly("--first=hello");
+  }
+
+  @Test
+  public void setOptionValueAtSpecificPriorityWithoutExpansion_impliedFlag_setsValueSkipsParsed()
+      throws Exception {
+    OptionsParser parser =
+        OptionsParser.builder().optionsClasses(ImplicitDependencyOptions.class).build();
+    ParsedOptionDescription first =
+        ParsedOptionDescription.newDummyInstance(
+            OptionDefinition.extractOptionDefinition(
+                ImplicitDependencyOptions.class.getField("first")),
+            createInvocationPolicyOrigin());
+    OptionInstanceOrigin origin =
+        createInvocationPolicyOrigin(/*implicitDependent=*/ first, /*expandedFrom=*/ null);
+
+    OptionDefinition optionDefinition =
+        OptionDefinition.extractOptionDefinition(
+            ImplicitDependencyOptions.class.getField("second"));
+
+    parser.setOptionValueAtSpecificPriorityWithoutExpansion(origin, optionDefinition, "hello");
+
+    ImplicitDependencyOptions options = parser.getOptions(ImplicitDependencyOptions.class);
+    assertThat(options.second).isEqualTo("hello");
+    assertThat(options.third).isNull();
+    assertThat(
+            parser.asCompleteListOfParsedOptions().stream()
+                .map(ParsedOptionDescription::getCommandLineForm))
+        .isEmpty();
+  }
+
+  @Test
+  public void setOptionValueAtSpecificPriorityWithoutExpansion_expandedFlag_setsValueAndParsed()
+      throws Exception {
+    OptionsParser parser =
+        OptionsParser.builder().optionsClasses(ImplicitDependencyOptions.class).build();
+    ParsedOptionDescription first =
+        ParsedOptionDescription.newDummyInstance(
+            OptionDefinition.extractOptionDefinition(
+                ImplicitDependencyOptions.class.getField("first")),
+            createInvocationPolicyOrigin());
+    OptionInstanceOrigin origin =
+        createInvocationPolicyOrigin(/*implicitDependent=*/ null, /*expandedFrom=*/ first);
+
+    OptionDefinition optionDefinition =
+        OptionDefinition.extractOptionDefinition(
+            ImplicitDependencyOptions.class.getField("second"));
+
+    parser.setOptionValueAtSpecificPriorityWithoutExpansion(origin, optionDefinition, "hello");
+
+    ImplicitDependencyOptions options = parser.getOptions(ImplicitDependencyOptions.class);
+    assertThat(options.second).isEqualTo("hello");
+    assertThat(options.third).isNull();
+    assertThat(
+            parser.asCompleteListOfParsedOptions().stream()
+                .map(ParsedOptionDescription::getCommandLineForm))
+        .containsExactly("--second=hello");
+  }
+
+  private static OptionInstanceOrigin createInvocationPolicyOrigin() {
+    return createInvocationPolicyOrigin(/*implicitDependent=*/ null, /*expandedFrom=*/ null);
+  }
+
+  private static OptionInstanceOrigin createInvocationPolicyOrigin(
+      ParsedOptionDescription implicitDependent, ParsedOptionDescription expandedFrom) {
+    return new OptionInstanceOrigin(
+        OptionPriority.lowestOptionPriorityAtCategory(PriorityCategory.INVOCATION_POLICY),
+        "invocation policy",
+        implicitDependent,
+        expandedFrom);
   }
 }

@@ -22,13 +22,11 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.OutputGroupInfo;
-import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.Runfiles.Builder;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
-import com.google.devtools.build.lib.analysis.TransitionMode;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.analysis.actions.CustomCommandLine;
 import com.google.devtools.build.lib.analysis.actions.Substitution.ComputedSubstitution;
@@ -92,8 +90,6 @@ public interface JavaSemantics {
   FileType JAR = FileType.of(".jar");
   FileType PROPERTIES = FileType.of(".properties");
   FileType SOURCE_JAR = FileType.of(".srcjar");
-  // TODO(bazel-team): Rename this metadata extension to something meaningful.
-  FileType COVERAGE_METADATA = FileType.of(".em");
 
   /** Label to the Java Toolchain rule. It is resolved from a label given in the java options. */
   String JAVA_TOOLCHAIN_LABEL = "//tools/jdk:toolchain";
@@ -109,8 +105,12 @@ public interface JavaSemantics {
     return environment.getToolsLabel("//tools/jdk:current_java_toolchain");
   }
 
-  /** Name of the output group used for source jars. */
+  /** Name of the output group used for transitive source jars. */
   String SOURCE_JARS_OUTPUT_GROUP = OutputGroupInfo.HIDDEN_OUTPUT_GROUP_PREFIX + "source_jars";
+
+  /** Name of the output group used for direct source jars. */
+  String DIRECT_SOURCE_JARS_OUTPUT_GROUP =
+      OutputGroupInfo.HIDDEN_OUTPUT_GROUP_PREFIX + "direct_source_jars";
 
   /** Implementation for the :jvm attribute. */
   static Label jvmAttribute(RuleDefinitionEnvironment env) {
@@ -139,6 +139,11 @@ public interface JavaSemantics {
               // Don't depend on the launcher if we don't create an executable anyway
               if (attributes.has("create_executable")
                   && !attributes.get("create_executable", Type.BOOLEAN)) {
+                return null;
+              }
+
+              // use_launcher=False disables the launcher
+              if (attributes.has("use_launcher") && !attributes.get("use_launcher", Type.BOOLEAN)) {
                 return null;
               }
 
@@ -323,9 +328,19 @@ public interface JavaSemantics {
    */
   boolean isJavaExecutableSubstitution();
 
+  /**
+   * Returns true if target is a test target, has TestConfiguration, and persistent test runner set.
+   *
+   * <p>Note that no TestConfiguration implies the TestConfiguration was pruned in some parent of
+   * the rule. Therefore, TestTarget not currently being analyzed as part of top-level and thus
+   * persistent test runner is not especially relevant.
+   */
   static boolean isTestTargetAndPersistentTestRunner(RuleContext ruleContext) {
-    return ruleContext.isTestTarget()
-        && ruleContext.getFragment(TestConfiguration.class).isPersistentTestRunner();
+    if (!ruleContext.isTestTarget()) {
+      return false;
+    }
+    TestConfiguration testConfiguration = ruleContext.getFragment(TestConfiguration.class);
+    return testConfiguration != null && testConfiguration.isPersistentTestRunner();
   }
 
   static Runfiles getTestSupportRunfiles(RuleContext ruleContext) {
@@ -357,8 +372,7 @@ public interface JavaSemantics {
 
     boolean createExecutable = ruleContext.attributes().get("create_executable", Type.BOOLEAN);
     if (createExecutable && ruleContext.attributes().get("use_testrunner", Type.BOOLEAN)) {
-      return Iterables.getOnlyElement(
-          ruleContext.getPrerequisites("$testsupport", TransitionMode.TARGET));
+      return Iterables.getOnlyElement(ruleContext.getPrerequisites("$testsupport"));
     } else {
       return null;
     }
@@ -409,21 +423,8 @@ public interface JavaSemantics {
   Iterable<String> getJvmFlags(
       RuleContext ruleContext, ImmutableList<Artifact> srcsArtifacts, List<String> userJvmFlags);
 
-  /**
-   * Adds extra providers to a Java target.
-   *
-   * @throws InterruptedException
-   */
-  void addProviders(
-      RuleContext ruleContext,
-      JavaCommon javaCommon,
-      Artifact gensrcJar,
-      RuleConfiguredTargetBuilder ruleBuilder)
-      throws InterruptedException;
-
   /** Translates XMB messages to translations artifact suitable for Java targets. */
-  ImmutableList<Artifact> translate(
-      RuleContext ruleContext, JavaConfiguration javaConfig, List<Artifact> messages);
+  ImmutableList<Artifact> translate(RuleContext ruleContext, List<Artifact> messages);
 
   /**
    * Get the launcher artifact for a java binary, creating the necessary actions for it.

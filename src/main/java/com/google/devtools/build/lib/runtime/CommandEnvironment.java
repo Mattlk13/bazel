@@ -14,19 +14,22 @@
 
 package com.google.devtools.build.lib.runtime;
 
+import static com.google.common.base.Preconditions.checkState;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
 import com.google.common.eventbus.EventBus;
 import com.google.devtools.build.lib.actions.MetadataProvider;
 import com.google.devtools.build.lib.actions.ResourceManager;
-import com.google.devtools.build.lib.actions.cache.ActionCache;
 import com.google.devtools.build.lib.analysis.AnalysisOptions;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.config.CoreOptions;
+import com.google.devtools.build.lib.clock.Clock;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.events.Reporter;
 import com.google.devtools.build.lib.exec.SingleBuildFileCache;
-import com.google.devtools.build.lib.packages.StarlarkSemanticsOptions;
+import com.google.devtools.build.lib.packages.semantics.BuildLanguageOptions;
 import com.google.devtools.build.lib.pkgcache.PackageManager;
 import com.google.devtools.build.lib.pkgcache.PackageOptions;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
@@ -39,9 +42,9 @@ import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
 import com.google.devtools.build.lib.skyframe.SkyframeBuildView;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
 import com.google.devtools.build.lib.skyframe.TopDownActionCache;
+import com.google.devtools.build.lib.skyframe.WorkspaceInfoFromDiff;
 import com.google.devtools.build.lib.util.AbruptExitException;
 import com.google.devtools.build.lib.util.DetailedExitCode;
-import com.google.devtools.build.lib.util.ExitCode;
 import com.google.devtools.build.lib.util.io.OutErr;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
@@ -50,7 +53,7 @@ import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.common.options.OptionsParsingResult;
 import com.google.devtools.common.options.OptionsProvider;
-import java.io.IOException;
+import com.google.protobuf.Any;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -63,6 +66,7 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 
@@ -86,6 +90,7 @@ public class CommandEnvironment {
   private final Set<String> visibleActionEnv = new TreeSet<>();
   private final Set<String> visibleTestEnv = new TreeSet<>();
   private final Map<String, String> repoEnv = new TreeMap<>();
+  private final Map<String, String> repoEnvFromOptions = new TreeMap<>();
   private final TimestampGranularityMonitor timestampGranularityMonitor;
   private final Thread commandThread;
   private final Command command;
@@ -95,11 +100,15 @@ public class CommandEnvironment {
   private final PathFragment relativeWorkingDirectory;
   private final Duration waitTime;
   private final long commandStartTime;
+  private final ImmutableList<Any> commandExtensions;
+  private final ImmutableList.Builder<Any> responseExtensions = ImmutableList.builder();
+  private final Consumer<String> shutdownReasonConsumer;
 
   private OutputService outputService;
   private TopDownActionCache topDownActionCache;
   private String workspaceName;
   private boolean hasSyncedPackageLoading = false;
+  @Nullable private WorkspaceInfoFromDiff workspaceInfoFromDiff;
 
   // This AtomicReference is set to:
   //   - null, if neither BlazeModuleEnvironment#exit nor #precompleteCommand have been called
@@ -151,7 +160,9 @@ public class CommandEnvironment {
       OptionsParsingResult options,
       List<String> warnings,
       long waitTimeInMs,
-      long commandStartTime) {
+      long commandStartTime,
+      List<Any> commandExtensions,
+      Consumer<String> shutdownReasonConsumer) {
     this.runtime = runtime;
     this.workspace = workspace;
     this.directories = workspace.getDirectories();
@@ -160,6 +171,7 @@ public class CommandEnvironment {
     this.commandThread = commandThread;
     this.command = command;
     this.options = options;
+    this.shutdownReasonConsumer = shutdownReasonConsumer;
     this.blazeModuleEnvironment = new BlazeModuleEnvironment();
     this.timestampGranularityMonitor = new TimestampGranularityMonitor(runtime.getClock());
     // Record the command's starting time again, for use by
@@ -172,7 +184,6 @@ public class CommandEnvironment {
         Preconditions.checkNotNull(
             options.getOptions(CommonCommandOptions.class),
             "CommandEnvironment needs its options provider to have CommonCommandOptions loaded.");
-    Path workspacePath = directories.getWorkspace();
     Path workingDirectory;
     try {
       workingDirectory = computeWorkingDirectory(commandOptions);
@@ -180,7 +191,7 @@ public class CommandEnvironment {
       // We'll exit very soon, but set the working directory to something reasonable so remainder of
       // setup can finish.
       this.blazeModuleEnvironment.exit(e);
-      workingDirectory = workspacePath;
+      workingDirectory = directories.getWorkingDirectory();
     }
     this.workingDirectory = workingDirectory;
     if (getWorkspace() != null) {
@@ -192,14 +203,17 @@ public class CommandEnvironment {
 
     this.waitTime = Duration.ofMillis(waitTimeInMs + commandOptions.waitTime);
     this.commandStartTime = commandStartTime - commandOptions.startupTime;
+    this.commandExtensions = ImmutableList.copyOf(commandExtensions);
     // If this command supports --package_path we initialize the package locator scoped
     // to the command environment
-    if (commandHasPackageOptions(command) && workspacePath != null) {
+    if (commandHasPackageOptions(command) && directories.getWorkspace() != null) {
       this.packageLocator =
           workspace
               .getSkyframeExecutor()
               .createPackageLocator(
-                  reporter, options.getOptions(PackageOptions.class).packagePath, workingDirectory);
+                  reporter,
+                  options.getOptions(PackageOptions.class).packagePath,
+                  directories.getWorkspace());
     } else {
       this.packageLocator = null;
     }
@@ -212,7 +226,10 @@ public class CommandEnvironment {
 
     this.clientEnv = makeMapFromMapEntries(clientOptions.clientEnv);
     this.commandId = computeCommandId(commandOptions.invocationId, warnings);
-    this.buildRequestId = computeBuildRequestId(commandOptions.buildRequestId, warnings);
+    this.buildRequestId =
+        commandOptions.buildRequestId != null
+            ? commandOptions.buildRequestId
+            : UUID.randomUUID().toString();
 
     this.repoEnv.putAll(clientEnv);
     if (command.builds()) {
@@ -235,10 +252,15 @@ public class CommandEnvironment {
       }
     }
 
-    CoreOptions configOpts = options.getOptions(CoreOptions.class);
-    if (configOpts != null) {
-      for (Map.Entry<String, String> entry : configOpts.repositoryEnvironment) {
+    for (Map.Entry<String, String> entry : commandOptions.repositoryEnvironment) {
+      String name = entry.getKey();
+      String value = entry.getValue();
+      if (value == null) {
+        value = System.getenv(name);
+      }
+      if (value != null) {
         repoEnv.put(entry.getKey(), entry.getValue());
+        repoEnvFromOptions.put(entry.getKey(), entry.getValue());
       }
     }
   }
@@ -252,7 +274,6 @@ public class CommandEnvironment {
       if (clientCwd.containsUplevelReferences()) {
         throw new AbruptExitException(
             DetailedExitCode.of(
-                ExitCode.COMMAND_LINE_ERROR,
                 FailureDetail.newBuilder()
                     .setMessage("Client cwd '" + clientCwd + "' contains uplevel references")
                     .setClientEnvironment(
@@ -264,7 +285,6 @@ public class CommandEnvironment {
       if (clientCwd.isAbsolute() && !clientCwd.startsWith(workspace.asFragment())) {
         throw new AbruptExitException(
             DetailedExitCode.of(
-                ExitCode.COMMAND_LINE_ERROR,
                 FailureDetail.newBuilder()
                     .setMessage(
                         String.format(
@@ -310,6 +330,20 @@ public class CommandEnvironment {
     return runtime;
   }
 
+  public Clock getClock() {
+    return getRuntime().getClock();
+  }
+
+  void notifyOnCrash(String message) {
+    shutdownReasonConsumer.accept(message);
+    // Give shutdown hooks priority in JVM and stop generating more data for modules to consume.
+    commandThread.interrupt();
+  }
+
+  public OptionsProvider getStartupOptionsProvider() {
+    return getRuntime().getStartupOptionsProvider();
+  }
+
   public BlazeWorkspace getBlazeWorkspace() {
     return workspace;
   }
@@ -349,7 +383,6 @@ public class CommandEnvironment {
   public Command getCommand() {
     return command;
   }
-
   public String getCommandName() {
     return command.name();
   }
@@ -417,22 +450,6 @@ public class CommandEnvironment {
     return commandId;
   }
 
-  private String computeBuildRequestId(String idFromOptions, List<String> warnings) {
-    String buildRequestId = idFromOptions;
-    if (buildRequestId == null) {
-      String uuidString = clientEnv.getOrDefault("BAZEL_INTERNAL_BUILD_REQUEST_ID", "");
-      if (!uuidString.isEmpty()) {
-        buildRequestId = uuidString;
-        warnings.add(
-            "BAZEL_INTERNAL_BUILD_REQUEST_ID is set. This will soon be deprecated in favor of "
-                + "--build_request_id. Please switch to using the flag.");
-      } else {
-        buildRequestId = UUID.randomUUID().toString();
-      }
-    }
-    return buildRequestId;
-  }
-
   public TimestampGranularityMonitor getTimestampGranularityMonitor() {
     return timestampGranularityMonitor;
   }
@@ -493,7 +510,7 @@ public class CommandEnvironment {
    * Callers should certainly not make this assumption. The Path returned may be null.
    */
   public Path getWorkspace() {
-    return getDirectories().getWorkspace();
+    return getDirectories().getWorkingDirectory();
   }
 
   public String getWorkspaceName() {
@@ -502,7 +519,7 @@ public class CommandEnvironment {
   }
 
   public void setWorkspaceName(String workspaceName) {
-    Preconditions.checkState(this.workspaceName == null, "workspace name can only be set once");
+    checkState(this.workspaceName == null, "workspace name can only be set once");
     this.workspaceName = workspaceName;
     eventBus.post(new ExecRootEvent(getExecRoot()));
   }
@@ -566,8 +583,17 @@ public class CommandEnvironment {
     this.outputService = outputService;
   }
 
-  public ActionCache getPersistentActionCache() throws IOException {
-    return workspace.getPersistentActionCache(reporter);
+  /**
+   * Returns workspace information obtained from the {@linkplain
+   * com.google.devtools.build.lib.skyframe.DiffAwareness.View#getWorkspaceInfo() diff} or null.
+   *
+   * <p>We store workspace info as an optimization to allow sharing of information about the
+   * workspace if it was derived from the diff at the time of synchronizing the workspace. This way
+   * we can make it available earlier during the build and avoid retrieving it again.
+   */
+  @Nullable
+  public WorkspaceInfoFromDiff getWorkspaceInfoFromDiff() {
+    return workspaceInfoFromDiff;
   }
 
   /** Returns the top-down action cache to use, or null. */
@@ -664,16 +690,18 @@ public class CommandEnvironment {
           "We should never call this method more than once over the course of a single command");
     }
     hasSyncedPackageLoading = true;
-    getSkyframeExecutor()
-        .sync(
-            reporter,
-            options.getOptions(PackageOptions.class),
-            packageLocator,
-            options.getOptions(StarlarkSemanticsOptions.class),
-            getCommandId(),
-            clientEnv,
-            timestampGranularityMonitor,
-            options);
+    workspaceInfoFromDiff =
+        getSkyframeExecutor()
+            .sync(
+                reporter,
+                options.getOptions(PackageOptions.class),
+                packageLocator,
+                options.getOptions(BuildLanguageOptions.class),
+                getCommandId(),
+                clientEnv,
+                repoEnvFromOptions,
+                timestampGranularityMonitor,
+                options);
   }
 
   public void recordLastExecutionTime() {
@@ -780,5 +808,31 @@ public class CommandEnvironment {
       }
       return fileCache;
     }
+  }
+
+  /**
+   * Returns the {@linkplain
+   * com.google.devtools.build.lib.server.CommandProtos.RunRequest#getCommandExtensions extensions}
+   * passed to the server for this command.
+   *
+   * <p>Extensions are arbitrary messages containing additional per-command information.
+   */
+  public ImmutableList<Any> getCommandExtensions() {
+    return commandExtensions;
+  }
+
+  /**
+   * Returns the {@linkplain
+   * com.google.devtools.build.lib.server.CommandProtos.RunResponse#getCommandExtensions extensions}
+   * to be passed to the client for this command.
+   *
+   * <p>Extensions are arbitrary messages containing additional execution results.
+   */
+  public ImmutableList<Any> getResponseExtensions() {
+    return responseExtensions.build();
+  }
+
+  public void addResponseExtensions(Iterable<Any> extensions) {
+    responseExtensions.addAll(extensions);
   }
 }

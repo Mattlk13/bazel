@@ -21,10 +21,12 @@ import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactRoot;
+import com.google.devtools.build.lib.actions.ArtifactRoot.RootType;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.LocationExpander.LocationFunction;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
+import com.google.devtools.build.lib.vfs.DigestHashFunction;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
@@ -163,6 +165,7 @@ final class LocationFunctionBuilder {
   private final Label root;
   private final boolean multiple;
   private boolean execPaths;
+  private boolean legacyExternalRunfiles;
   private final Map<Label, Collection<Artifact>> labelMap = new HashMap<>();
 
   LocationFunctionBuilder(String rootLabel, boolean multiple) {
@@ -171,11 +174,17 @@ final class LocationFunctionBuilder {
   }
 
   public LocationFunction build() {
-    return new LocationFunction(root, Suppliers.ofInstance(labelMap), execPaths, multiple);
+    return new LocationFunction(
+        root, Suppliers.ofInstance(labelMap), execPaths, legacyExternalRunfiles, multiple);
   }
 
   public LocationFunctionBuilder setExecPaths(boolean execPaths) {
     this.execPaths = execPaths;
+    return this;
+  }
+
+  public LocationFunctionBuilder setLegacyExternalRunfiles(boolean legacyExternalRunfiles) {
+    this.legacyExternalRunfiles = legacyExternalRunfiles;
     return this;
   }
 
@@ -189,10 +198,11 @@ final class LocationFunctionBuilder {
   }
 
   private static Artifact makeArtifact(String path) {
-    FileSystem fs = new InMemoryFileSystem();
+    FileSystem fs = new InMemoryFileSystem(DigestHashFunction.SHA256);
     if (path.startsWith("/exec/out")) {
       return ActionsTestUtil.createArtifact(
-          ArtifactRoot.asDerivedRoot(fs.getPath("/exec"), "out"), fs.getPath(path));
+          ArtifactRoot.asDerivedRoot(fs.getPath("/exec"), RootType.Output, "out"),
+          fs.getPath(path));
     } else {
       return ActionsTestUtil.createArtifact(
           ArtifactRoot.asSourceRoot(Root.fromPath(fs.getPath("/exec"))), fs.getPath(path));

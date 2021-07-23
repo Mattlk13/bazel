@@ -15,6 +15,7 @@
 package com.google.devtools.build.lib.skyframe;
 
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.devtools.build.skyframe.EvaluationResultSubjectFactory.assertThatEvaluationResult;
 import static com.google.devtools.build.skyframe.WalkableGraphUtils.exists;
 
 import com.google.common.base.Preconditions;
@@ -78,11 +79,11 @@ public class PrepareDepsOfTargetsUnderDirectoryFunctionTest extends BuildViewTes
         EvaluationContext.newBuilder()
             .setKeepGoing(false)
             .setNumThreads(SequencedSkyframeExecutor.DEFAULT_THREAD_COUNT)
-            .setEventHander(reporter)
+            .setEventHandler(reporter)
             .build();
     EvaluationResult<PrepareDepsOfTargetsUnderDirectoryValue> evaluationResult =
         skyframeExecutor.getDriver().evaluate(ImmutableList.copyOf(keys), evaluationContext);
-    Preconditions.checkState(!evaluationResult.hasError());
+    assertThatEvaluationResult(evaluationResult).hasNoError();
     return evaluationResult;
   }
 

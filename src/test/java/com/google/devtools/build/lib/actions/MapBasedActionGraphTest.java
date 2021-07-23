@@ -16,6 +16,7 @@ package com.google.devtools.build.lib.actions;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
+import com.google.devtools.build.lib.actions.ArtifactRoot.RootType;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil.UncheckedActionConflictException;
@@ -24,6 +25,7 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.AbstractQueueVisitor;
 import com.google.devtools.build.lib.concurrent.ErrorClassifier;
+import com.google.devtools.build.lib.vfs.DigestHashFunction;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
@@ -34,33 +36,33 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-/**
- * Tests for {@link MapBasedActionGraph}.
- */
+/** Tests for {@link MapBasedActionGraph}. */
 @RunWith(JUnit4.class)
-public class MapBasedActionGraphTest {
-  private final FileSystem fileSystem = new InMemoryFileSystem();
+public final class MapBasedActionGraphTest {
+
+  private final FileSystem fileSystem = new InMemoryFileSystem(DigestHashFunction.SHA256);
   private final ActionKeyContext actionKeyContext = new ActionKeyContext();
 
   @Test
   public void testSmoke() throws Exception {
-    MutableActionGraph actionGraph =
-        new MapBasedActionGraph(/*eventHandler=*/ ignored -> {}, actionKeyContext);
+    MutableActionGraph actionGraph = new MapBasedActionGraph(actionKeyContext);
     Path execRoot = fileSystem.getPath("/");
     String outSegment = "root";
     Path root = execRoot.getChild(outSegment);
     Path path = root.getRelative("foo");
     Artifact output =
-        ActionsTestUtil.createArtifact(ArtifactRoot.asDerivedRoot(execRoot, outSegment), path);
+        ActionsTestUtil.createArtifact(
+            ArtifactRoot.asDerivedRoot(execRoot, RootType.Output, outSegment), path);
     Action action =
         new TestAction(
             TestAction.NO_EFFECT,
             NestedSetBuilder.emptySet(Order.STABLE_ORDER),
             ImmutableSet.of(output));
     actionGraph.registerAction(action);
-    actionGraph.unregisterAction(action);
     path = root.getRelative("bar");
-    output = ActionsTestUtil.createArtifact(ArtifactRoot.asDerivedRoot(execRoot, outSegment), path);
+    output =
+        ActionsTestUtil.createArtifact(
+            ArtifactRoot.asDerivedRoot(execRoot, RootType.Output, outSegment), path);
     Action action2 =
         new TestAction(
             TestAction.NO_EFFECT,
@@ -68,19 +70,19 @@ public class MapBasedActionGraphTest {
             ImmutableSet.of(output));
     actionGraph.registerAction(action);
     actionGraph.registerAction(action2);
-    actionGraph.unregisterAction(action);
   }
 
   @Test
   public void testNoActionConflictWhenUnregisteringSharedAction() throws Exception {
-    MutableActionGraph actionGraph =
-        new MapBasedActionGraph(/*eventHandler=*/ ignored -> {}, actionKeyContext);
+    MutableActionGraph actionGraph = new MapBasedActionGraph(actionKeyContext);
     Path execRoot = fileSystem.getPath("/");
     Path root = fileSystem.getPath("/root");
     Path path = root.getRelative("foo");
     Artifact output =
         ActionsTestUtil.createArtifact(
-            ArtifactRoot.asDerivedRoot(execRoot, root.relativeTo(execRoot).getPathString()), path);
+            ArtifactRoot.asDerivedRoot(
+                execRoot, RootType.Output, root.relativeTo(execRoot).getPathString()),
+            path);
     Action action =
         new TestAction(
             TestAction.NO_EFFECT,
@@ -93,12 +95,10 @@ public class MapBasedActionGraphTest {
             NestedSetBuilder.emptySet(Order.STABLE_ORDER),
             ImmutableSet.of(output));
     actionGraph.registerAction(otherAction);
-    actionGraph.unregisterAction(action);
   }
 
   private class ActionRegisterer extends AbstractQueueVisitor {
-    private final MutableActionGraph graph =
-        new MapBasedActionGraph(/*eventHandler=*/ ignored -> {}, new ActionKeyContext());
+    private final MutableActionGraph graph = new MapBasedActionGraph(new ActionKeyContext());
     private final Artifact output;
     // Just to occasionally add actions that were already present.
     private final Set<Action> allActions = Sets.newConcurrentHashSet();
@@ -117,7 +117,8 @@ public class MapBasedActionGraphTest {
       Path root = execRoot.getChild(rootSegment);
       Path path = root.getChild("foo");
       output =
-          ActionsTestUtil.createArtifact(ArtifactRoot.asDerivedRoot(execRoot, rootSegment), path);
+          ActionsTestUtil.createArtifact(
+              ArtifactRoot.asDerivedRoot(execRoot, RootType.Output, rootSegment), path);
       allActions.add(
           new TestAction(
               TestAction.NO_EFFECT,
@@ -125,29 +126,18 @@ public class MapBasedActionGraphTest {
               ImmutableSet.of(output)));
     }
 
-    private void registerAction(final Action action) {
+    private void registerAction(Action action) {
       execute(
-          new Runnable() {
-            @Override
-            public void run() {
-              try {
-                graph.registerAction(action);
-              } catch (ActionConflictException e) {
-                throw new UncheckedActionConflictException(e);
-              }
-              doRandom();
+          () -> {
+            try {
+              graph.registerAction(action);
+            } catch (ActionConflictException e) {
+              throw new UncheckedActionConflictException(e);
+            } catch (InterruptedException e) {
+              Thread.currentThread().interrupt();
+              throw new IllegalStateException("Interrupts not expected in this test");
             }
-          });
-    }
-
-    private void unregisterAction(final Action action) {
-      execute(
-          new Runnable() {
-            @Override
-            public void run() {
-              graph.unregisterAction(action);
-              doRandom();
-            }
+            doRandom();
           });
     }
 
@@ -155,7 +145,7 @@ public class MapBasedActionGraphTest {
       if (actionCount.incrementAndGet() > 10000) {
         return;
       }
-      Action action = null;
+      Action action;
       if (Math.random() < 0.5) {
         action = Iterables.getFirst(allActions, null);
       } else {
@@ -166,11 +156,7 @@ public class MapBasedActionGraphTest {
                 ImmutableSet.of(output));
         allActions.add(action);
       }
-      if (Math.random() < 0.5) {
-        registerAction(action);
-      } else {
-        unregisterAction(action);
-      }
+      registerAction(action);
     }
 
     private void work() throws InterruptedException {

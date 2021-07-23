@@ -18,11 +18,13 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.actions.FileValue;
-import com.google.devtools.build.lib.actions.InconsistentFilesystemException;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.io.FileSymlinkInfiniteExpansionException;
+import com.google.devtools.build.lib.io.FileSymlinkInfiniteExpansionUniquenessFunction;
+import com.google.devtools.build.lib.io.InconsistentFilesystemException;
 import com.google.devtools.build.lib.vfs.Dirent;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.RootedPath;
@@ -235,6 +237,28 @@ public final class GlobFunction implements SkyFunction {
           if (!symlinkFileValue.exists()) {
             continue;
           }
+
+          // This check is more strict than necessary: we raise an error if globbing traverses into
+          // a directory for any reason, even though it's only necessary if that reason was the
+          // resolution of a recursive glob ("**"). Fixing this would require plumbing the ancestor
+          // symlink information through DirectoryListingValue.
+          if (symlinkFileValue.isDirectory()
+              && symlinkFileValue.unboundedAncestorSymlinkExpansionChain() != null) {
+            SkyKey uniquenessKey =
+                FileSymlinkInfiniteExpansionUniquenessFunction.key(
+                    symlinkFileValue.unboundedAncestorSymlinkExpansionChain());
+            env.getValue(uniquenessKey);
+            if (env.valuesMissing()) {
+              return null;
+            }
+
+            FileSymlinkInfiniteExpansionException symlinkException =
+                new FileSymlinkInfiniteExpansionException(
+                    symlinkFileValue.pathToUnboundedAncestorSymlinkExpansionChain(),
+                    symlinkFileValue.unboundedAncestorSymlinkExpansionChain());
+            throw new GlobFunctionException(symlinkException, Transience.PERSISTENT);
+          }
+
           Dirent dirent = symlinkFileMap.get(lookedUpKeyAndValue.getKey());
           String fileName = dirent.getName();
           if (symlinkFileValue.isDirectory()) {
@@ -412,6 +436,10 @@ public final class GlobFunction implements SkyFunction {
    */
   private static final class GlobFunctionException extends SkyFunctionException {
     public GlobFunctionException(InconsistentFilesystemException e, Transience transience) {
+      super(e, transience);
+    }
+
+    public GlobFunctionException(FileSymlinkInfiniteExpansionException e, Transience transience) {
       super(e, transience);
     }
   }

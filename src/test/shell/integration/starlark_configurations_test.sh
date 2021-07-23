@@ -56,7 +56,10 @@ if "$is_windows"; then
   export MSYS2_ARG_CONV_EXCL="*"
 fi
 
-add_to_bazelrc "build --package_path=%workspace%"
+function set_up() {
+  write_default_bazelrc
+  add_to_bazelrc "build --package_path=%workspace%"
+}
 
 #### HELPER FXNS #######################################################
 
@@ -446,11 +449,11 @@ function test_output_same_config_as_generating_target() {
   local -r pkg=$FUNCNAME
   mkdir -p $pkg
 
-  rm -rf tools/whitelists/function_transition_whitelist
-  mkdir -p tools/whitelists/function_transition_whitelist
-  cat > tools/whitelists/function_transition_whitelist/BUILD <<EOF
+  rm -rf tools/allowlists/function_transition_allowlist
+  mkdir -p tools/allowlists/function_transition_allowlist
+  cat > tools/allowlists/function_transition_allowlist/BUILD <<EOF
 package_group(
-    name = "function_transition_whitelist",
+    name = "function_transition_allowlist",
     packages = [
         "//...",
     ],
@@ -460,14 +463,14 @@ EOF
   cat > $pkg/rules.bzl <<EOF
 def _rule_class_transition_impl(settings, attr):
     return {
-        "//command_line_option:test_arg": ["blah"]
+        "//command_line_option:platform_suffix": "blah"
     }
 
 _rule_class_transition = transition(
     implementation = _rule_class_transition_impl,
     inputs = [],
     outputs = [
-        "//command_line_option:test_arg",
+        "//command_line_option:platform_suffix",
     ],
 )
 
@@ -479,7 +482,7 @@ rule_class_transition_rule = rule(
     _rule_class_transition_rule_impl,
     cfg = _rule_class_transition,
     attrs = {
-        "_whitelist_function_transition": attr.label(default = "//tools/whitelists/function_transition_whitelist"),
+        "_allowlist_function_transition": attr.label(default = "//tools/allowlists/function_transition_allowlist"),
     },
     outputs = {"artifact": "%{name}.output"},
 )
@@ -575,6 +578,127 @@ EOF
       --noexperimental_check_output_files \
       2>>"$TEST_log" || fail "Expected build to succeed"
   assert_equals "Value=True" "$(cat bazel-genfiles/$pkg/out-flag.txt)"
+}
+
+# Integration test for an invalid output directory from a mnemonic via a
+# transition. Integration test required because error is emitted in BuildTool.
+# Unit test for dep transition in
+# StarlarkRuleTransitionProviderTest#invalidMnemonicFromDepTransition.
+function test_invalid_mnemonic_from_transition_top_level() {
+  mkdir -p tools/allowlists/function_transition_allowlist test
+  cat > tools/allowlists/function_transition_allowlist/BUILD <<'EOF'
+package_group(
+    name = 'function_transition_allowlist',
+    packages = [
+        '//test/...',
+    ],
+)
+EOF
+  cat > test/rule.bzl <<'EOF'
+def _trans_impl(settings, attr):
+  return {'//command_line_option:cpu': '//bad:cpu'}
+
+my_transition = transition(implementation = _trans_impl, inputs = [],
+  outputs = ['//command_line_option:cpu'])
+
+def _impl(ctx):
+  return []
+
+my_rule = rule(
+  implementation = _impl,
+  cfg = my_transition,
+  attrs = {
+    '_allowlist_function_transition': attr.label(
+        default = '//tools/allowlists/function_transition_allowlist',
+    ),
+  }
+)
+EOF
+  cat > test/BUILD <<'EOF'
+load('//test:rule.bzl', 'my_rule')
+my_rule(name = 'test')
+EOF
+  bazel build //test:test >& "$TEST_log" || exit_code="$?"
+  assert_equals 2 "$exit_code" || fail "Expected exit code 2"
+  expect_log "Output directory name '//bad:cpu' specified by CppConfiguration"
+  expect_log "is invalid as part of a path: must not contain /"
+}
+
+function test_rc_flag_alias_canonicalizes() {
+  local -r pkg=$FUNCNAME
+  mkdir -p $pkg
+
+  add_to_bazelrc "build --flag_alias=drink=//$pkg:type"
+
+  write_build_setting_bzl
+
+  bazel canonicalize-flags -- --drink=coffee \
+    >& "$TEST_log" || fail "Expected success"
+
+  expect_log "--//$pkg:type=coffee"
+}
+
+function test_rc_flag_alias_unsupported_under_test_command() {
+  local -r pkg=$FUNCNAME
+  mkdir -p $pkg
+
+  add_to_bazelrc "test --flag_alias=drink=//$pkg:type"
+  write_build_setting_bzl
+
+  bazel canonicalize-flags -- --drink=coffee \
+    >& "$TEST_log" && fail "Expected failure"
+  expect_log "--flag_alias=drink=//$pkg:type\" disallowed. --flag_alias only "\
+"supports the \"build\" command."
+
+  bazel build //$pkg:my_drink >& "$TEST_log" && fail "Expected failure"
+  expect_log "--flag_alias=drink=//$pkg:type\" disallowed. --flag_alias only "\
+"supports the \"build\" command."
+
+  # Post-test cleanup_workspace() calls "bazel clean", which would also fail
+  # unless we reset the bazelrc.
+  write_default_bazelrc
+}
+
+function test_rc_flag_alias_unsupported_under_conditional_build_command() {
+  local -r pkg=$FUNCNAME
+  mkdir -p $pkg
+
+  add_to_bazelrc "build:foo --flag_alias=drink=//$pkg:type"
+  write_build_setting_bzl
+
+  bazel canonicalize-flags -- --drink=coffee \
+>& "$TEST_log" && fail "Expected failure"
+  expect_log "--flag_alias=drink=//$pkg:type\" disallowed. --flag_alias only "\
+"supports the \"build\" command."
+
+  bazel build //$pkg:my_drink >& "$TEST_log" && fail "Expected failure"
+  expect_log "--flag_alias=drink=//$pkg:type\" disallowed. --flag_alias only "\
+"supports the \"build\" command."
+
+  # Post-test cleanup_workspace() calls "bazel clean", which would also fail
+  # unless we reset the bazelrc.
+  write_default_bazelrc
+}
+
+function test_rc_flag_alias_unsupported_with_space_assignment_syntax() {
+  local -r pkg=$FUNCNAME
+  mkdir -p $pkg
+
+  add_to_bazelrc "test --flag_alias drink=//$pkg:type"
+  write_build_setting_bzl
+
+  bazel canonicalize-flags -- --drink=coffee \
+    >& "$TEST_log" && fail "Expected failure"
+  expect_log "--flag_alias\" disallowed. --flag_alias only "\
+"supports the \"build\" command."
+
+  bazel build //$pkg:my_drink >& "$TEST_log" && fail "Expected failure"
+  expect_log "--flag_alias\" disallowed. --flag_alias only "\
+"supports the \"build\" command."
+
+  # Post-test cleanup_workspace() calls "bazel clean", which would also fail
+  # unless we reset the bazelrc.
+  write_default_bazelrc
 }
 
 run_suite "${PRODUCT_NAME} starlark configurations tests"

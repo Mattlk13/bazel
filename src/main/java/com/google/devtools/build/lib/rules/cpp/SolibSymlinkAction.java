@@ -46,8 +46,9 @@ import java.io.IOException;
 import javax.annotation.Nullable;
 
 /**
- * Creates mangled symlinks in the solib directory for all shared libraries. Libraries that have a
- * potential to contain SONAME field rely on the mangled symlink to the parent directory instead.
+ * Creates mangled symlinks in the solib directory for all shared libraries. For shared libraries
+ * that have potential to contain a SONAME field, create a link to the shared library parent
+ * directory instead - so that the name of the library file is preserved.
  *
  * <p>Such symlinks are used by the linker to ensure that all rpath entries can be specified
  * relative to the $ORIGIN.
@@ -169,7 +170,8 @@ public final class SolibSymlinkAction extends AbstractAction {
       PathFragment path) {
     Preconditions.checkArgument(Link.SHARED_LIBRARY_FILETYPES.matches(library.getFilename()));
     Preconditions.checkArgument(Link.SHARED_LIBRARY_FILETYPES.matches(path.getBaseName()));
-    Preconditions.checkArgument(!library.getRootRelativePath().getSegment(0).startsWith("_solib_"));
+    Preconditions.checkArgument(
+        !library.getRootRelativePath().getPathString().startsWith("_solib_"));
 
     PathFragment solibDirPath = PathFragment.create(solibDir);
     PathFragment linkName = solibDirPath.getRelative(path);
@@ -208,7 +210,8 @@ public final class SolibSymlinkAction extends AbstractAction {
       Artifact library,
       PathFragment symlinkName) {
     Preconditions.checkArgument(Link.SHARED_LIBRARY_FILETYPES.matches(library.getFilename()));
-    Preconditions.checkArgument(!library.getRootRelativePath().getSegment(0).startsWith("_solib_"));
+    Preconditions.checkArgument(
+        !library.getRootRelativePath().getPathString().startsWith("_solib_"));
 
     // Ignore libraries that are already represented by the symlinks.
     ArtifactRoot root = actionConstructionContext.getBinDirectory();

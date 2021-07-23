@@ -22,9 +22,9 @@ import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.query2.cquery.ConfiguredTargetQueryEnvironment;
 import com.google.devtools.build.lib.query2.cquery.CqueryOptions;
 import com.google.devtools.build.lib.query2.engine.QueryEnvironment.QueryFunction;
-import com.google.devtools.build.lib.query2.engine.QueryException;
 import com.google.devtools.build.lib.query2.engine.QueryExpression;
 import com.google.devtools.build.lib.query2.engine.QueryParser;
+import com.google.devtools.build.lib.query2.engine.QuerySyntaxException;
 import com.google.devtools.build.lib.runtime.BlazeCommand;
 import com.google.devtools.build.lib.runtime.BlazeCommandResult;
 import com.google.devtools.build.lib.runtime.BlazeRuntime;
@@ -46,16 +46,20 @@ import java.util.Set;
 
 /** Handles the 'cquery' command on the Blaze command line. */
 @Command(
-  name = "cquery",
-  builds = true,
-  inherits = {BuildCommand.class},
-  options = {CqueryOptions.class},
-  usesConfigurationOptions = true,
-  shortDescription = "Loads, analyzes, and queries the specified targets w/ configurations.",
-  allowResidue = true,
-  completion = "label",
-  help = "resource:cquery.txt"
-)
+    name = "cquery",
+    builds = true,
+    // We inherit from TestCommand so that we pick up changes like `test --test_arg=foo` in .bazelrc
+    // files.
+    // Without doing this, there is no easy way to use the output of cquery to determine whether a
+    // test has changed between two invocations, because the testrunner action is not easily
+    // introspectable.
+    inherits = {TestCommand.class},
+    options = {CqueryOptions.class},
+    usesConfigurationOptions = true,
+    shortDescription = "Loads, analyzes, and queries the specified targets w/ configurations.",
+    allowResidue = true,
+    completion = "label",
+    help = "resource:cquery.txt")
 public final class CqueryCommand implements BlazeCommand {
 
   @Override
@@ -113,8 +117,10 @@ public final class CqueryCommand implements BlazeCommand {
     QueryExpression expr;
     try {
       expr = QueryParser.parse(query, functions);
-    } catch (QueryException e) {
-      String message = "Error while parsing '" + query + "': " + e.getMessage();
+    } catch (QuerySyntaxException e) {
+      String message =
+          String.format(
+              "Error while parsing '%s': %s", QueryExpression.truncate(query), e.getMessage());
       env.getReporter().handle(Event.error(message));
       return createFailureResult(message, Code.EXPRESSION_PARSE_FAILURE);
     }
@@ -126,15 +132,18 @@ public final class CqueryCommand implements BlazeCommand {
       topLevelTargets = new ArrayList<>(targetPatternSet);
     }
     BlazeRuntime runtime = env.getRuntime();
+
     BuildRequest request =
-        BuildRequest.create(
-            getClass().getAnnotation(Command.class).name(),
-            options,
-            runtime.getStartupOptionsProvider(),
-            topLevelTargets,
-            env.getReporter().getOutErr(),
-            env.getCommandId(),
-            env.getCommandStartTime());
+        BuildRequest.builder()
+            .setCommandName(getClass().getAnnotation(Command.class).name())
+            .setId(env.getCommandId())
+            .setOptions(options)
+            .setStartupOptions(runtime.getStartupOptionsProvider())
+            .setOutErr(env.getReporter().getOutErr())
+            .setTargets(topLevelTargets)
+            .setStartTimeMillis(env.getCommandStartTime())
+            .setCheckforActionConflicts(false)
+            .build();
     DetailedExitCode detailedExitCode =
         new CqueryBuildTool(env, expr).processRequest(request, null).getDetailedExitCode();
     return BlazeCommandResult.detailedExitCode(detailedExitCode);

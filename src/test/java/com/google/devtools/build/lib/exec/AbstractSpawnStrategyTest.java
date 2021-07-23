@@ -20,6 +20,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.verifyZeroInteractions;
 import static org.mockito.Mockito.when;
 
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
@@ -42,9 +44,10 @@ import com.google.devtools.build.lib.exec.SpawnCache.CacheHandle;
 import com.google.devtools.build.lib.exec.SpawnRunner.SpawnExecutionContext;
 import com.google.devtools.build.lib.exec.util.SpawnBuilder;
 import com.google.devtools.build.lib.remote.options.RemoteOptions;
+import com.google.devtools.build.lib.server.FailureDetails;
+import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
+import com.google.devtools.build.lib.server.FailureDetails.Spawn.Code;
 import com.google.devtools.build.lib.testutil.Scratch;
-import com.google.devtools.build.lib.testutil.Suite;
-import com.google.devtools.build.lib.testutil.TestSpec;
 import com.google.devtools.build.lib.util.io.MessageOutputStream;
 import com.google.devtools.build.lib.vfs.DigestHashFunction;
 import com.google.devtools.build.lib.vfs.FileSystem;
@@ -62,11 +65,15 @@ import org.mockito.MockitoAnnotations;
 
 /** Tests for {@link BlazeExecutor}. */
 @RunWith(JUnit4.class)
-@TestSpec(size = Suite.SMALL_TESTS)
 public class AbstractSpawnStrategyTest {
+  private static final FailureDetail NON_ZERO_EXIT_DETAILS =
+      FailureDetail.newBuilder()
+          .setSpawn(FailureDetails.Spawn.newBuilder().setCode(Code.NON_ZERO_EXIT))
+          .build();
+
   private static class TestedSpawnStrategy extends AbstractSpawnStrategy {
     public TestedSpawnStrategy(Path execRoot, SpawnRunner spawnRunner) {
-      super(execRoot, spawnRunner);
+      super(execRoot, spawnRunner, /*verboseFailures=*/ true);
     }
   }
 
@@ -116,6 +123,7 @@ public class AbstractSpawnStrategyTest {
         new SpawnResult.Builder()
             .setStatus(Status.NON_ZERO_EXIT)
             .setExitCode(1)
+            .setFailureDetail(NON_ZERO_EXIT_DETAILS)
             .setRunnerName("test")
             .build();
     when(spawnRunner.execAsync(any(Spawn.class), any(SpawnExecutionContext.class)))
@@ -175,6 +183,84 @@ public class AbstractSpawnStrategyTest {
   }
 
   @Test
+  public void testExec_whenLocalCaches_usesNoCache() throws Exception {
+    when(spawnRunner.handlesCaching()).thenReturn(true);
+
+    SpawnCache cache = mock(SpawnCache.class);
+
+    when(actionExecutionContext.getContext(eq(SpawnCache.class))).thenReturn(cache);
+    when(actionExecutionContext.getExecRoot()).thenReturn(execRoot);
+    SpawnResult spawnResult =
+        new SpawnResult.Builder().setStatus(Status.SUCCESS).setRunnerName("test").build();
+    when(spawnRunner.execAsync(any(Spawn.class), any(SpawnExecutionContext.class)))
+        .thenReturn(FutureSpawn.immediate(spawnResult));
+
+    List<SpawnResult> spawnResults =
+        new TestedSpawnStrategy(execRoot, spawnRunner).exec(SIMPLE_SPAWN, actionExecutionContext);
+
+    assertThat(spawnResults).containsExactly(spawnResult);
+
+    // Must only be called exactly once.
+    verify(spawnRunner).execAsync(any(Spawn.class), any(SpawnExecutionContext.class));
+    verifyZeroInteractions(cache);
+  }
+
+  @Test
+  public void testExec_usefulCacheInDynamicExecution() throws Exception {
+    when(spawnRunner.handlesCaching()).thenReturn(false);
+
+    SpawnCache cache = mock(SpawnCache.class);
+    when(cache.usefulInDynamicExecution()).thenReturn(true);
+    CacheHandle entry = mock(CacheHandle.class);
+    when(cache.lookup(any(Spawn.class), any(SpawnExecutionContext.class))).thenReturn(entry);
+    when(entry.hasResult()).thenReturn(false);
+    when(entry.willStore()).thenReturn(true);
+
+    when(actionExecutionContext.getContext(eq(SpawnCache.class))).thenReturn(cache);
+    when(actionExecutionContext.getExecRoot()).thenReturn(execRoot);
+    SpawnResult spawnResult =
+        new SpawnResult.Builder().setStatus(Status.SUCCESS).setRunnerName("test").build();
+    when(spawnRunner.execAsync(any(Spawn.class), any(SpawnExecutionContext.class)))
+        .thenReturn(FutureSpawn.immediate(spawnResult));
+
+    List<SpawnResult> spawnResults =
+        new TestedSpawnStrategy(execRoot, spawnRunner)
+            .exec(SIMPLE_SPAWN, actionExecutionContext, () -> {});
+
+    assertThat(spawnResults).containsExactly(spawnResult);
+
+    // Must only be called exactly once.
+    verify(spawnRunner).execAsync(any(Spawn.class), any(SpawnExecutionContext.class));
+    verify(entry).store(eq(spawnResult));
+  }
+
+  @Test
+  public void testExec_nonUsefulCacheInDynamicExecution() throws Exception {
+    when(spawnRunner.handlesCaching()).thenReturn(false);
+
+    SpawnCache cache = mock(SpawnCache.class);
+    when(cache.usefulInDynamicExecution()).thenReturn(false);
+
+    when(actionExecutionContext.getContext(eq(SpawnCache.class))).thenReturn(cache);
+    when(actionExecutionContext.getExecRoot()).thenReturn(execRoot);
+    SpawnResult spawnResult =
+        new SpawnResult.Builder().setStatus(Status.SUCCESS).setRunnerName("test").build();
+    when(spawnRunner.execAsync(any(Spawn.class), any(SpawnExecutionContext.class)))
+        .thenReturn(FutureSpawn.immediate(spawnResult));
+
+    List<SpawnResult> spawnResults =
+        new TestedSpawnStrategy(execRoot, spawnRunner)
+            .exec(SIMPLE_SPAWN, actionExecutionContext, () -> {});
+
+    assertThat(spawnResults).containsExactly(spawnResult);
+
+    // Must only be called exactly once.
+    verify(spawnRunner).execAsync(any(Spawn.class), any(SpawnExecutionContext.class));
+    verify(cache).usefulInDynamicExecution();
+    verifyNoMoreInteractions(cache);
+  }
+
+  @Test
   public void testCacheMissWithNonZeroExit() throws Exception {
     SpawnCache cache = mock(SpawnCache.class);
     CacheHandle entry = mock(CacheHandle.class);
@@ -188,6 +274,7 @@ public class AbstractSpawnStrategyTest {
         new SpawnResult.Builder()
             .setStatus(Status.NON_ZERO_EXIT)
             .setExitCode(1)
+            .setFailureDetail(NON_ZERO_EXIT_DETAILS)
             .setRunnerName("test")
             .build();
     when(spawnRunner.execAsync(any(Spawn.class), any(SpawnExecutionContext.class)))
@@ -273,6 +360,7 @@ public class AbstractSpawnStrategyTest {
             .setExitCode(23)
             .setRemotable(true)
             .setCacheable(true)
+            .setRemoteCacheable(true)
             .setProgressMessage("my progress message")
             .setMnemonic("MyMnemonic")
             .setRunner("runner")
@@ -295,7 +383,7 @@ public class AbstractSpawnStrategyTest {
   }
 
   @Test
-  public void testLogSpawn_DefaultPlatform_getsLogged() throws Exception {
+  public void testLogSpawn_defaultPlatform_getsLogged() throws Exception {
     RemoteOptions remoteOptions = Options.getDefaults(RemoteOptions.class);
     remoteOptions.remoteDefaultPlatformProperties =
         String.join(
@@ -325,7 +413,7 @@ public class AbstractSpawnStrategyTest {
   }
 
   @Test
-  public void testLogSpawn_SpecifiedPlatform_overridesDefault() throws Exception {
+  public void testLogSpawn_specifiedPlatform_overridesDefault() throws Exception {
     RemoteOptions remoteOptions = Options.getDefaults(RemoteOptions.class);
     remoteOptions.remoteDefaultPlatformProperties =
         String.join(
@@ -383,6 +471,7 @@ public class AbstractSpawnStrategyTest {
                 new SpawnResult.Builder()
                     .setStatus(Status.NON_ZERO_EXIT)
                     .setExitCode(23)
+                    .setFailureDetail(NON_ZERO_EXIT_DETAILS)
                     .setRunnerName("runner")
                     .build()));
     when(actionExecutionContext.getMetadataProvider()).thenReturn(mock(MetadataProvider.class));
@@ -398,6 +487,7 @@ public class AbstractSpawnStrategyTest {
         .setMnemonic("Mnemonic")
         .setRunner("runner")
         .setStatus("NON_ZERO_EXIT")
-        .setExitCode(23);
+        .setExitCode(23)
+        .setRemoteCacheable(true);
   }
 }

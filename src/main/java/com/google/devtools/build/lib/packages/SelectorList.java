@@ -18,17 +18,17 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.collect.nestedset.Depset;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
-import com.google.devtools.build.lib.syntax.Dict;
-import com.google.devtools.build.lib.syntax.EvalException;
-import com.google.devtools.build.lib.syntax.HasBinary;
-import com.google.devtools.build.lib.syntax.Printer;
-import com.google.devtools.build.lib.syntax.Starlark;
-import com.google.devtools.build.lib.syntax.StarlarkValue;
-import com.google.devtools.build.lib.syntax.TokenKind;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import net.starlark.java.annot.StarlarkBuiltin;
+import net.starlark.java.eval.Dict;
+import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.HasBinary;
+import net.starlark.java.eval.Printer;
+import net.starlark.java.eval.Starlark;
+import net.starlark.java.eval.StarlarkValue;
+import net.starlark.java.syntax.TokenKind;
 
 /**
  * An attribute value consisting of a concatenation of native types and selects, e.g:
@@ -131,7 +131,7 @@ public final class SelectorList implements StarlarkValue, HasBinary {
 
     for (Object value : values) {
       if (value instanceof SelectorList) {
-        elements.addAll(((SelectorList) value).getElements());
+        elements.addAll(((SelectorList) value).elements);
       } else {
         elements.add(value);
       }
@@ -152,7 +152,7 @@ public final class SelectorList implements StarlarkValue, HasBinary {
 
   private static String getTypeName(Object x) {
     if (x instanceof SelectorList) {
-      return "select of " + Depset.ElementType.of(((SelectorList) x).getType());
+      return "select of " + Depset.ElementType.of(((SelectorList) x).type);
     } else if (x instanceof SelectorValue) {
       return "select of " + Depset.ElementType.of(((SelectorValue) x).getType());
     } else {
@@ -162,7 +162,7 @@ public final class SelectorList implements StarlarkValue, HasBinary {
 
   private static Class<?> getNativeType(Object value) {
     if (value instanceof SelectorList) {
-      return ((SelectorList) value).getType();
+      return ((SelectorList) value).type;
     } else if (value instanceof SelectorValue) {
       return ((SelectorValue) value).getType();
     } else {
@@ -177,11 +177,8 @@ public final class SelectorList implements StarlarkValue, HasBinary {
   private static boolean canConcatenate(Class<?> type1, Class<?> type2) {
     if (type1 == type2) {
       return true;
-    } else if (isListType(type1) && isListType(type2)) {
-      return true;
-    } else {
-      return false;
     }
+    return isListType(type1) && isListType(type2);
   }
 
   @Override
@@ -191,7 +188,7 @@ public final class SelectorList implements StarlarkValue, HasBinary {
 
   @Override
   public void repr(Printer printer) {
-    printer.printList(elements, "", " + ", "", null);
+    printer.printList(elements, "", " + ", "");
   }
 
   @Override

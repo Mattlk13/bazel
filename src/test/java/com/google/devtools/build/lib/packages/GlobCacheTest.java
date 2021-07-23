@@ -18,6 +18,7 @@ import static org.junit.Assert.assertThrows;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
+import com.google.devtools.build.lib.actions.ThreadStateReceiver;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.packages.Globber.BadGlobException;
 import com.google.devtools.build.lib.testutil.Scratch;
@@ -112,7 +113,8 @@ public class GlobCacheTest {
             },
             null,
             TestUtils.getPool(),
-            -1);
+            -1,
+            ThreadStateReceiver.NULL_INSTANCE);
   }
 
   @After
@@ -205,13 +207,13 @@ public class GlobCacheTest {
   }
 
   @Test
-  public void testSingleFileExclude_Star() throws Exception {
+  public void testSingleFileExclude_star() throws Exception {
     assertThat(cache.globUnsorted(list("*"), list("first.txt"), false, true))
         .containsExactly("BUILD", "bar", "first.js", "foo", "second.js", "second.txt");
   }
 
   @Test
-  public void testSingleFileExclude_StarStar() throws Exception {
+  public void testSingleFileExclude_starStar() throws Exception {
     assertThat(cache.globUnsorted(list("**"), list("first.txt"), false, true))
         .containsExactly(
             "BUILD",
@@ -227,22 +229,22 @@ public class GlobCacheTest {
   }
 
   @Test
-  public void testExcludeAll_Star() throws Exception {
+  public void testExcludeAll_star() throws Exception {
     assertThat(cache.globUnsorted(list("*"), list("*"), false, true)).isEmpty();
   }
 
   @Test
-  public void testExcludeAll_Star_NoMatchesAnyway() throws Exception {
+  public void testExcludeAll_star_noMatchesAnyway() throws Exception {
     assertThat(cache.globUnsorted(list("nope"), list("*"), false, true)).isEmpty();
   }
 
   @Test
-  public void testExcludeAll_StarStar() throws Exception {
+  public void testExcludeAll_starStar() throws Exception {
     assertThat(cache.globUnsorted(list("**"), list("**"), false, true)).isEmpty();
   }
 
   @Test
-  public void testExcludeAll_Manual() throws Exception {
+  public void testExcludeAll_manual() throws Exception {
     assertThat(cache.globUnsorted(list("**"), list("*", "*/*", "*/*/*"), false, true)).isEmpty();
   }
 

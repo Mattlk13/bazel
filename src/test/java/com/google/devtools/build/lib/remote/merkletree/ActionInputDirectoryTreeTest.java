@@ -23,7 +23,6 @@ import com.google.devtools.build.lib.actions.cache.VirtualActionInput;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.remote.merkletree.DirectoryTree.FileNode;
 import com.google.devtools.build.lib.remote.util.StaticMetadataProvider;
-import com.google.devtools.build.lib.remote.util.StringActionInput;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -71,9 +70,9 @@ public class ActionInputDirectoryTreeTest extends DirectoryTreeTest {
     assertThat(directoriesAtDepth(1, tree)).isEmpty();
 
     FileNode expectedFooNode =
-        new FileNode("foo.cc", foo.getPath(), digestUtil.computeAsUtf8("foo"));
+        FileNode.createExecutable("foo.cc", foo.getPath(), digestUtil.computeAsUtf8("foo"));
     FileNode expectedBarNode =
-        new FileNode("bar.cc", bar.getBytes(), digestUtil.computeAsUtf8("bar"));
+        FileNode.createExecutable("bar.cc", bar.getBytes(), digestUtil.computeAsUtf8("bar"));
     assertThat(fileNodesAtDepth(tree, 0)).isEmpty();
     assertThat(fileNodesAtDepth(tree, 1)).containsExactly(expectedFooNode, expectedBarNode);
   }
@@ -118,12 +117,12 @@ public class ActionInputDirectoryTreeTest extends DirectoryTreeTest {
     assertThat(directoriesAtDepth(3, tree)).isEmpty();
 
     FileNode expectedFooNode =
-        new FileNode("foo.cc", foo.getPath(), digestUtil.computeAsUtf8("foo"));
+        FileNode.createExecutable("foo.cc", foo.getPath(), digestUtil.computeAsUtf8("foo"));
     FileNode expectedBarNode =
-        new FileNode(
+        FileNode.createExecutable(
             "bar.cc", execRoot.getRelative(bar.getExecPath()), digestUtil.computeAsUtf8("bar"));
     FileNode expectedBuzzNode =
-        new FileNode(
+        FileNode.createExecutable(
             "buzz.cc", execRoot.getRelative(buzz.getExecPath()), digestUtil.computeAsUtf8("buzz"));
     assertThat(fileNodesAtDepth(tree, 0)).isEmpty();
     assertThat(fileNodesAtDepth(tree, 1)).containsExactly(expectedFooNode);
@@ -133,8 +132,9 @@ public class ActionInputDirectoryTreeTest extends DirectoryTreeTest {
 
   private static VirtualActionInput addVirtualFile(
       String path, String content, SortedMap<PathFragment, ActionInput> sortedInputs) {
-    VirtualActionInput input = new StringActionInput(content, PathFragment.create(path));
-    sortedInputs.put(PathFragment.create(path), input);
+    PathFragment pathFragment = PathFragment.create(path);
+    VirtualActionInput input = ActionsTestUtil.createVirtualActionInput(pathFragment, content);
+    sortedInputs.put(pathFragment, input);
     return input;
   }
 

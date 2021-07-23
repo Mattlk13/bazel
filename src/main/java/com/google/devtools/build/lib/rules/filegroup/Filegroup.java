@@ -17,12 +17,9 @@ package com.google.devtools.build.lib.rules.filegroup;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.devtools.build.lib.analysis.OutputGroupInfo.INTERNAL_SUFFIX;
 
-import com.google.devtools.build.lib.actions.Actions;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
-import com.google.devtools.build.lib.analysis.CompilationHelper;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
-import com.google.devtools.build.lib.analysis.MiddlemanProvider;
 import com.google.devtools.build.lib.analysis.OutputGroupInfo;
 import com.google.devtools.build.lib.analysis.PrerequisiteArtifacts;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
@@ -30,7 +27,6 @@ import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
-import com.google.devtools.build.lib.analysis.TransitionMode;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.test.InstrumentedFilesCollector;
@@ -49,7 +45,7 @@ import java.util.List;
  */
 public class Filegroup implements RuleConfiguredTargetFactory {
 
-  /** Error message for output groups that are explicitly blacklisted for filegroup reference. */
+  /** Error message for output groups that are explicitly forbidden from filegroup reference. */
   public static final String ILLEGAL_OUTPUT_GROUP_ERROR =
       "Output group %s is not permitted for " + "reference in filegroups.";
 
@@ -65,17 +61,27 @@ public class Filegroup implements RuleConfiguredTargetFactory {
 
     NestedSet<Artifact> filesToBuild =
         outputGroupName.isEmpty()
-            ? PrerequisiteArtifacts.nestedSet(ruleContext, "srcs", TransitionMode.TARGET)
-            : getArtifactsForOutputGroup(
-                outputGroupName, ruleContext.getPrerequisites("srcs", TransitionMode.TARGET));
+            ? PrerequisiteArtifacts.nestedSet(ruleContext, "srcs")
+            : getArtifactsForOutputGroup(outputGroupName, ruleContext.getPrerequisites("srcs"));
 
     InstrumentedFilesInfo instrumentedFilesProvider =
-        InstrumentedFilesCollector.collectTransitive(
+        InstrumentedFilesCollector.collect(
             ruleContext,
-            new InstrumentationSpec(FileTypeSet.ANY_FILE)
-                .withDeprecatedSourceOrDependencyAttributes("srcs", "deps", "data")
-                .withSourceAttributes("srcs")
-                .withDependencyAttributes("data"),
+            // Seems strange to have "srcs" in "dependency attributes" instead of "source
+            // attributes", but that's correct behavior here because this rule just forwards
+            // files, it doesn't process them. It doesn't know if the dependencies of the stuff
+            // in srcs is a runtime dependency of its consumers or not. Consumers decide which
+            // of the following is the case about a filegroup it depends on based on whether the
+            // attribute the dependency is via is in the consumer's source attributes or
+            // dependency attributes:
+            // * If the filegroup contains coverage-relevant source files, it should be depended
+            //   on via something in source attributes. The dependencies for actions which generate
+            //   source files are generally not runtime dependencies.
+            // * If the dependencies of the filegroup might be coverage-relevant source files (e.g.
+            //   a binary target is included in filegroup's srcs and the filegroup target is
+            //   included in some other target's data), it should be depended on via something in
+            //   dependency attributes.
+            new InstrumentationSpec(FileTypeSet.ANY_FILE).withDependencyAttributes("srcs", "data"),
             /* reportedToActualSources= */ NestedSetBuilder.create(Order.STABLE_ORDER));
 
     RunfilesProvider runfilesProvider =
@@ -101,13 +107,6 @@ public class Filegroup implements RuleConfiguredTargetFactory {
                 FilegroupPathProvider.class,
                 new FilegroupPathProvider(getFilegroupPath(ruleContext)));
 
-    if (configuration.enableAggregatingMiddleman()) {
-      builder.addProvider(
-          MiddlemanProvider.class,
-          new MiddlemanProvider(
-              CompilationHelper.getAggregatingMiddleman(
-                  ruleContext, Actions.escapeLabel(ruleContext.getLabel()), filesToBuild)));
-    }
     return builder.build();
   }
 

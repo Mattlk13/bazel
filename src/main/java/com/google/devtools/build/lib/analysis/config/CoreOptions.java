@@ -342,27 +342,29 @@ public class CoreOptions extends FragmentOptions implements Cloneable {
       documentationCategory = OptionDocumentationCategory.OUTPUT_PARAMETERS,
       effectTags = {OptionEffectTag.ACTION_COMMAND_LINES},
       help =
-          "Specifies the set of environment variables available to actions. "
-              + "Variables can be either specified by name, in which case the value will be "
-              + "taken from the invocation environment, or by the name=value pair which sets "
-              + "the value independent of the invocation environment. This option can be used "
-              + "multiple times; for options given for the same variable, the latest wins, options "
-              + "for different variables accumulate.")
+          "Specifies the set of environment variables available to actions with target"
+              + " configuration. Variables can be either specified by name, in which case the"
+              + " value will be taken from the invocation environment, or by the name=value pair"
+              + " which sets the value independent of the invocation environment. This option can"
+              + " be used multiple times; for options given for the same variable, the latest"
+              + " wins, options for different variables accumulate.")
   public List<Map.Entry<String, String>> actionEnvironment;
 
   @Option(
-      name = "repo_env",
+      name = "host_action_env",
       converter = Converters.OptionalAssignmentConverter.class,
       allowMultiple = true,
       defaultValue = "null",
       documentationCategory = OptionDocumentationCategory.OUTPUT_PARAMETERS,
       effectTags = {OptionEffectTag.ACTION_COMMAND_LINES},
       help =
-          "Specifies additional environment variables to be available only for repository rules."
-              + " Note that repository rules see the full environment anyway, but in this way"
-              + " configuration information can be passed to repositories through options without"
-              + " invalidating the action graph.")
-  public List<Map.Entry<String, String>> repositoryEnvironment;
+          "Specifies the set of environment variables available to actions with host or execution"
+              + " configurations. Variables can be either specified by name, in which case the"
+              + " value will be taken from the invocation environment, or by the name=value pair"
+              + " which sets the value independent of the invocation environment. This option can"
+              + " be used multiple times; for options given for the same variable, the latest"
+              + " wins, options for different variables accumulate.")
+  public List<Map.Entry<String, String>> hostActionEnvironment;
 
   @Option(
       name = "collect_code_coverage",
@@ -377,32 +379,13 @@ public class CoreOptions extends FragmentOptions implements Cloneable {
   public boolean collectCodeCoverage;
 
   @Option(
-      name = "experimental_forward_instrumented_files_info_by_default",
-      defaultValue = "false",
-      documentationCategory = OptionDocumentationCategory.OUTPUT_PARAMETERS,
-      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
-      help =
-          "If specified, rules that don't configure InstrumentedFilesInfo will still forward the "
-              + "contents of InstrumentedFilesInfo from transitive dependencies.")
-  public boolean experimentalForwardInstrumentedFilesInfoByDefault;
-
-  @Option(
-      name = "experimental_ignore_deprecated_instrumentation_spec",
-      defaultValue = "false",
-      documentationCategory = OptionDocumentationCategory.OUTPUT_PARAMETERS,
-      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
-      help =
-          "If specified, use a new configuration of InstrumentationSpec which distinguishes "
-              + "between source and dependency attributes for rules which still used a legacy "
-              + "configuration with a single list of coverage-relevant attributes.")
-  public boolean experimentalIgnoreDeprecatedInstrumentationSpec;
-
-  @Option(
       name = "build_runfile_manifests",
       defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.OUTPUT_SELECTION,
       effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
-      help = "If true, write runfiles manifests for all targets.  " + "If false, omit them.")
+      help =
+          "If true, write runfiles manifests for all targets. If false, omit them. Local tests will"
+              + " fail to run when false.")
   public boolean buildRunfilesManifests;
 
   @Option(
@@ -523,22 +506,10 @@ public class CoreOptions extends FragmentOptions implements Cloneable {
       documentationCategory = OptionDocumentationCategory.OUTPUT_PARAMETERS,
       effectTags = {OptionEffectTag.EXECUTION},
       metadataTags = {OptionMetadataTag.EXPERIMENTAL},
-      help = "Use action_listener to attach an extra_action to existing build actions.")
-  public List<Label> actionListeners;
-
-  // TODO(bazel-team): Either remove this flag once transparent compression is shown to not
-  // noticeably affect running time, or keep this flag and move it into a new configuration
-  // fragment.
-  @Option(
-      name = "experimental_transparent_compression",
-      defaultValue = "true",
-      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
-      effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
-      metadataTags = {OptionMetadataTag.EXPERIMENTAL},
       help =
-          "Enables gzip compression for the contents of FileWriteActions, which reduces "
-              + "memory usage in the analysis phase at the expense of additional time overhead.")
-  public boolean transparentCompression;
+          "Deprecated in favor of aspects. Use action_listener to attach an extra_action to"
+              + " existing build actions.")
+  public List<Label> actionListeners;
 
   @Option(
       name = "is host configuration",
@@ -584,7 +555,7 @@ public class CoreOptions extends FragmentOptions implements Cloneable {
 
   @Option(
       name = "analysis_testing_deps_limit",
-      defaultValue = "600",
+      defaultValue = "800",
       documentationCategory = OptionDocumentationCategory.TESTING,
       effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
       help =
@@ -631,47 +602,6 @@ public class CoreOptions extends FragmentOptions implements Cloneable {
           "Declare the environment_group to use for automatically mapping cpu values to "
               + "target_environment values.")
   public Label autoCpuEnvironmentGroup;
-
-  /** Values for --experimental_dynamic_configs. */
-  public enum ConfigsMode {
-    /**
-     * Deprecated mode: Each configured target is evaluated with only the configuration fragments it
-     * needs by loading the target graph and examining the transitive requirements for each target
-     * before analysis begins.
-     *
-     * <p>To become a no-op soon: b/129289764
-     */
-    ON,
-    /** Default mode: Each configured target is evaluated with all fragments known to Blaze. */
-    NOTRIM,
-    /**
-     * Experimental mode: Each configured target is evaluated with only the configuration fragments
-     * it needs by visiting them with a full configuration to begin with and collapsing the
-     * configuration down to the fragments which were actually used.
-     */
-    RETROACTIVE;
-  }
-
-  /** Converter for --experimental_dynamic_configs. */
-  public static class ConfigsModeConverter extends EnumConverter<ConfigsMode> {
-    public ConfigsModeConverter() {
-      super(ConfigsMode.class, "configurations mode");
-    }
-  }
-
-  @Option(
-      name = "experimental_dynamic_configs",
-      defaultValue = "notrim",
-      converter = ConfigsModeConverter.class,
-      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
-      effectTags = {
-        OptionEffectTag.LOSES_INCREMENTAL_STATE,
-        OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION,
-        OptionEffectTag.LOADING_AND_ANALYSIS,
-      },
-      metadataTags = {OptionMetadataTag.EXPERIMENTAL},
-      help = "Instantiates build configurations with the specified properties")
-  public ConfigsMode configsMode;
 
   /** Values for --experimental_output_paths. */
   public enum OutputPathsMode {
@@ -728,7 +658,6 @@ public class CoreOptions extends FragmentOptions implements Cloneable {
 
   @Option(
       name = "enable_runfiles",
-      oldName = "experimental_enable_runfiles",
       defaultValue = "auto",
       documentationCategory = OptionDocumentationCategory.OUTPUT_PARAMETERS,
       effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
@@ -752,7 +681,7 @@ public class CoreOptions extends FragmentOptions implements Cloneable {
               + "support execution info, e.g. Genrule, CppCompile, Javac, StarlarkAction, "
               + "TestRunner. When specifying multiple values, order matters because "
               + "many regexes may apply to the same mnemonic.\n\n"
-              + "Syntax: \"regex=[+-]key,[+-]key,...\".\n\n"
+              + "Syntax: \"regex=[+-]key,regex=[+-]key,...\".\n\n"
               + "Examples:\n"
               + "  '.*=+x,.*=-y,.*=+z' adds 'x' and 'z' to, and removes 'y' from, "
               + "the execution info for all actions.\n"
@@ -763,8 +692,42 @@ public class CoreOptions extends FragmentOptions implements Cloneable {
   public ExecutionInfoModifier executionInfoModifier;
 
   @Option(
+      name = "incompatible_genquery_use_graphless_query",
+      defaultValue = "null",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      expansion = {
+        "--experimental_genquery_use_graphless_query=auto",
+      },
+      effectTags = {
+        OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION,
+        OptionEffectTag.AFFECTS_OUTPUTS,
+        OptionEffectTag.LOADING_AND_ANALYSIS
+      },
+      metadataTags = {
+        OptionMetadataTag.INCOMPATIBLE_CHANGE,
+        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+      },
+      help = "Use graphless query and disable output ordering for genquery.")
+  public Void incompatibleUseGraphlessQuery;
+
+  @Option(
+      name = "noincompatible_genquery_use_graphless_query",
+      defaultValue = "null",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      expansion = {
+        "--experimental_genquery_use_graphless_query=false",
+      },
+      effectTags = {
+        OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION,
+        OptionEffectTag.AFFECTS_OUTPUTS,
+        OptionEffectTag.LOADING_AND_ANALYSIS
+      },
+      help = "Do not use graphless query for genquery.")
+  public Void noincompatibleUseGraphlessQuery;
+
+  @Option(
       name = "experimental_genquery_use_graphless_query",
-      defaultValue = "false",
+      defaultValue = "auto",
       documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
       effectTags = {
         OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION,
@@ -773,21 +736,6 @@ public class CoreOptions extends FragmentOptions implements Cloneable {
       },
       help = "Whether to use graphless query and disable output ordering.")
   public TriState useGraphlessQuery;
-
-  @Option(
-      name = "experimental_inmemory_unused_inputs_list",
-      defaultValue = "false",
-      documentationCategory = OptionDocumentationCategory.BUILD_TIME_OPTIMIZATION,
-      effectTags = {
-        OptionEffectTag.LOADING_AND_ANALYSIS,
-        OptionEffectTag.EXECUTION,
-        OptionEffectTag.AFFECTS_OUTPUTS
-      },
-      metadataTags = {OptionMetadataTag.EXPERIMENTAL},
-      help =
-          "If enabled, the optional 'unused_inputs_list' file will be passed through in memory "
-              + "directly from the remote build nodes instead of being written to disk.")
-  public boolean inmemoryUnusedInputsList;
 
   @Option(
       name = "include_config_fragments_provider",
@@ -799,7 +747,8 @@ public class CoreOptions extends FragmentOptions implements Cloneable {
       help =
           "INTERNAL BLAZE DEVELOPER FEATURE: If \"direct\", all configured targets expose "
               + "RequiredConfigFragmentsProvider with the configuration fragments they directly "
-              + "require. If \"transitive\", they do the same but also include the fragments their "
+              + "require (use \"direct_host_only\" to limit to targets in the host configuration). "
+              + "If \"transitive\", they do the same but also include the fragments their "
               + "transitive dependencies require. If \"off\", the provider is omitted. "
               + ""
               + "If not \"off\", this also populates config_setting's "
@@ -848,23 +797,45 @@ public class CoreOptions extends FragmentOptions implements Cloneable {
   public boolean remotableSourceManifestActions;
 
   @Option(
-      name = "experimental_enable_aggregating_middleman",
-      defaultValue = "true",
+      name = "flag_alias",
+      converter = Converters.FlagAliasConverter.class,
+      defaultValue = "null",
+      allowMultiple = true,
+      documentationCategory = OptionDocumentationCategory.GENERIC_INPUTS,
+      effectTags = {OptionEffectTag.CHANGES_INPUTS},
+      help =
+          "Sets a shorthand name for a Starlark flag. It takes a single key-value pair in the form"
+              + " \"<key>=<value>\" as an argument.")
+  public List<Map.Entry<String, String>> commandLineFlagAliases;
+
+  @Option(
+      name = "archived_tree_artifact_mnemonics_filter",
+      defaultValue = "-.*", // disabled by default
       documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
-      effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
-      metadataTags = {OptionMetadataTag.EXPERIMENTAL},
-      help = "Whether to enable the use of AggregatingMiddleman in rules.")
-  public boolean enableAggregatingMiddleman;
+      effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS, OptionEffectTag.EXECUTION},
+      converter = RegexFilter.RegexFilterConverter.class,
+      help =
+          "Regex filter for mnemonics of actions for which we should create archived tree"
+              + " artifacts. This option is a no-op for actions which do not generate tree"
+              + " artifacts.")
+  public RegexFilter archivedArtifactsMnemonicsFilter;
 
   /** Ways configured targets may provide the {@link Fragment}s they require. */
   public enum IncludeConfigFragmentsEnum {
-    // Don't offer the provider at all. This is best for most builds, which don't use this
-    // information and don't need the extra memory hit over every configured target.
+    /**
+     * Don't offer the provider at all. This is best for most builds, which don't use this
+     * information and don't need the extra memory hit over every configured target.
+     */
     OFF,
-    // Provide the fragments required *directly* by this rule.
+    /**
+     * Provide the fragments required <em>directly</em> by this rule if it is being analyzed in the
+     * host configuration.
+     */
+    DIRECT_HOST_ONLY,
+    /** Provide the fragments required <em>directly</em> by this rule. */
     DIRECT,
-    // Provide the fragments required by this rule and its transitive dependencies.
-    TRANSITIVE;
+    /** Provide the fragments required by this rule and its transitive dependencies. */
+    TRANSITIVE
   }
 
   /** Enum converter for --include_config_fragments_provider. */
@@ -881,10 +852,10 @@ public class CoreOptions extends FragmentOptions implements Cloneable {
 
     host.outputDirectoryName = "host";
     host.transitionDirectoryNameFragment = transitionDirectoryNameFragment;
+    host.affectedByStarlarkTransition = affectedByStarlarkTransition;
     host.compilationMode = hostCompilationMode;
     host.isHost = true;
     host.isExec = false;
-    host.configsMode = configsMode;
     host.outputPathsMode = outputPathsMode;
     host.enableRunfiles = enableRunfiles;
     host.executionInfoModifier = executionInfoModifier;
@@ -892,9 +863,7 @@ public class CoreOptions extends FragmentOptions implements Cloneable {
     host.enforceConstraints = enforceConstraints;
     host.mergeGenfilesDirectory = mergeGenfilesDirectory;
     host.cpu = hostCpu;
-    host.inmemoryUnusedInputsList = inmemoryUnusedInputsList;
     host.includeRequiredConfigFragmentsProvider = includeRequiredConfigFragmentsProvider;
-    host.enableAggregatingMiddleman = enableAggregatingMiddleman;
 
     // === Runfiles ===
     host.buildRunfilesManifests = buildRunfilesManifests;
@@ -924,6 +893,13 @@ public class CoreOptions extends FragmentOptions implements Cloneable {
     // Save host options in case of a further exec->host transition.
     host.hostCpu = hostCpu;
     host.hostCompilationMode = hostCompilationMode;
+
+    // Pass host action environment variables
+    host.actionEnvironment = hostActionEnvironment;
+    host.hostActionEnvironment = hostActionEnvironment;
+
+    // Pass archived tree artifacts filter.
+    host.archivedArtifactsMnemonicsFilter = archivedArtifactsMnemonicsFilter;
 
     return host;
   }

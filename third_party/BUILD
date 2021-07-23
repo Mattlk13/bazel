@@ -3,8 +3,6 @@ load("//tools/distributions:distribution_rules.bzl", "distrib_jar_filegroup", "d
 
 package(default_visibility = ["//visibility:public"])
 
-load("@rules_pkg//:pkg.bzl", "pkg_tar")
-
 filegroup(
     name = "srcs",
     srcs = glob(["**"]) + [
@@ -12,6 +10,7 @@ filegroup(
         "//third_party/animal_sniffer:srcs",
         "//third_party/antlr:srcs",
         "//third_party/aws-sdk-auth-lite:srcs",
+        "//third_party/bazel-toolchains:srcs",
         "//third_party/checker_framework_dataflow:srcs",
         "//third_party/checker_framework_javacutil:srcs",
         "//third_party/css/bootstrap:srcs",
@@ -40,7 +39,8 @@ filegroup(
         "//third_party/protobuf:srcs",
         "//third_party/py/abseil:srcs",
         "//third_party/py/concurrent:srcs",
-        "//third_party/py/gflags:srcs",
+        "//third_party/py/dataclasses:srcs",
+        "//third_party/py/frozendict:srcs",
         "//third_party/py/mock:srcs",
         "//third_party/py/six:srcs",
         "//third_party/rules_python:srcs",
@@ -67,7 +67,7 @@ distrib_java_import(
     enable_distributions = ["debian"],
     jars = [
         "android_common/com.android.tools.layoutlib_layoutlib_26.1.2-stripped.jar",
-        "android_common/com.android.tools_sdk-common_25.0.0-stripped.jar",
+        "android_common/com.android.tools_sdk-common_25.0.0-patched-stripped.jar",
         "android_common/com.android.tools_repository_25.0.0.jar",
     ],
     deps = [
@@ -101,7 +101,7 @@ java_import(
         "android_common/com.android.tools_common_25.0.0.jar",
         "android_common/com.android.tools_dvlib_25.0.0.jar",
         "android_common/com.android.tools_repository_25.0.0.jar",
-        "android_common/com.android.tools_sdk-common_25.0.0.jar",
+        "android_common/com.android.tools_sdk-common_25.0.0-patched.jar",
         "android_common/com.android.tools_sdklib_25.0.0.jar",
     ],
     runtime_deps = [
@@ -139,7 +139,7 @@ distrib_java_import(
 distrib_java_import(
     name = "apache_commons_compress",
     enable_distributions = ["debian"],
-    jars = ["apache_commons_compress/apache-commons-compress-1.9.jar"],
+    jars = ["apache_commons_compress/apache-commons-compress-1.19.jar"],
 )
 
 distrib_java_import(
@@ -181,35 +181,35 @@ distrib_java_import(
 distrib_java_import(
     name = "asm",
     enable_distributions = ["debian"],
-    jars = ["asm/asm-8.0.jar"],
-    srcjar = "asm/asm-8.0-sources.jar",
+    jars = ["asm/asm-9.1.jar"],
+    srcjar = "asm/asm-9.1-sources.jar",
 )
 
 java_import(
     name = "asm-analysis",
-    jars = ["asm/asm-analysis-8.0.jar"],
-    srcjar = "asm/asm-analysis-8.0-sources.jar",
+    jars = ["asm/asm-analysis-9.1.jar"],
+    srcjar = "asm/asm-analysis-9.1-sources.jar",
     runtime_deps = [":asm-tree"],
 )
 
 java_import(
     name = "asm-commons",
-    jars = ["asm/asm-commons-8.0.jar"],
-    srcjar = "asm/asm-commons-8.0-sources.jar",
+    jars = ["asm/asm-commons-9.1.jar"],
+    srcjar = "asm/asm-commons-9.1-sources.jar",
     runtime_deps = [":asm-tree"],
 )
 
 java_import(
     name = "asm-tree",
-    jars = ["asm/asm-tree-8.0.jar"],
-    srcjar = "asm/asm-tree-8.0-sources.jar",
+    jars = ["asm/asm-tree-9.1.jar"],
+    srcjar = "asm/asm-tree-9.1-sources.jar",
     runtime_deps = [":asm"],
 )
 
 java_import(
     name = "asm-util",
-    jars = ["asm/asm-util-8.0.jar"],
-    srcjar = "asm/asm-util-8.0-sources.jar",
+    jars = ["asm/asm-util-9.1.jar"],
+    srcjar = "asm/asm-util-9.1-sources.jar",
     runtime_deps = [":asm-tree"],
 )
 
@@ -349,7 +349,7 @@ distrib_java_import(
 
 java_import(
     name = "caffeine",
-    jars = ["caffeine/caffeine-2.8.0.jar"],
+    jars = ["caffeine/caffeine-2.9.2.jar"],
 )
 
 java_import(
@@ -369,15 +369,15 @@ distrib_java_import(
     name = "error_prone_annotations",
     enable_distributions = ["debian"],
     jars = [
-        "error_prone/error_prone_annotations-2.4.0.jar",
-        "error_prone/error_prone_type_annotations-2.4.0.jar",
+        "error_prone/error_prone_annotations-2.6.0.jar",
+        "error_prone/error_prone_type_annotations-2.6.0.jar",
     ],
 )
 
 distrib_jar_filegroup(
     name = "error_prone_annotations-jar",
     srcs = [
-        "error_prone/error_prone_annotations-2.4.0.jar",
+        "error_prone/error_prone_annotations-2.6.0.jar",
         "error_prone/threeten-extra-1.5.0.jar",
     ],
     enable_distributions = ["debian"],
@@ -386,9 +386,9 @@ distrib_jar_filegroup(
 java_import(
     name = "error_prone",
     jars = [
-        "error_prone/error_prone_annotation-2.4.0.jar",
-        "error_prone/error_prone_check_api-2.4.0.jar",
-        "error_prone/error_prone_core-2.4.0.jar",
+        "error_prone/error_prone_annotation-2.6.0.jar",
+        "error_prone/error_prone_check_api-2.6.0.jar",
+        "error_prone/error_prone_core-2.6.0.jar",
     ],
     exports = [
         ":error_prone_annotations",
@@ -453,7 +453,10 @@ filegroup(
 distrib_java_import(
     name = "guava",
     enable_distributions = ["debian"],
-    jars = ["guava/guava-25.1-jre.jar"],
+    jars = [
+        "guava/failureaccess-1.0.1.jar",
+        "guava/guava-30.1.1-jre.jar",
+    ],
     exports = [
         ":error_prone_annotations",
         ":jcip_annotations",
@@ -501,14 +504,14 @@ distrib_java_import(
 # For bootstrapping JavaBuilder
 distrib_jar_filegroup(
     name = "guava-jars",
-    srcs = ["guava/guava-25.1-jre.jar"],
+    srcs = ["guava/guava-30.1.1-jre.jar"],
     enable_distributions = ["debian"],
 )
 
 java_import(
     name = "javax_activation",
     jars = ["javax_activation/javax.activation-api-1.2.0.jar"],
-    srcjar = "javax_annotations/javax.activation-api-1.2.0-sources.jar",
+    srcjar = "javax_activation/javax.activation-api-1.2.0-sources.jar",
 )
 
 # javax.annotation.Generated is not included in the default root modules in 9,
@@ -519,6 +522,20 @@ distrib_java_import(
     jars = ["javax_annotations/javax.annotation-api-1.3.2.jar"],
     neverlink = 1,  # @Generated is source-retention
     srcjar = "javax_annotations/javax.annotation-api-1.3.2-sources.jar",
+)
+
+distrib_java_import(
+    name = "reactive_streams",
+    enable_distributions = ["debian"],
+    jars = ["reactive_streams/reactive-streams-1.0.3.jar"],
+)
+
+distrib_java_import(
+    name = "rxjava3",
+    enable_distributions = ["debian"],
+    jars = ["rxjava3/rxjava-3.0.9.jar"],
+    exports = [":reactive_streams"],
+    deps = [":reactive_streams"],
 )
 
 java_import(
@@ -547,7 +564,6 @@ java_import(
 UNNECESSARY_DYNAMIC_LIBRARIES = select({
     "//src/conditions:windows": "*.so *.jnilib",
     "//src/conditions:darwin": "*.so *.dll",
-    "//src/conditions:darwin_x86_64": "*.so *.dll",
     "//src/conditions:linux_x86_64": "*.jnilib *.dll",
     # The .so file is an x86 one, so we can just remove it if the CPU is not x86
     "//src/conditions:arm": "*.so *.jnilib *.dll",
@@ -580,7 +596,7 @@ genrule(
 distrib_java_import(
     name = "netty",
     enable_distributions = ["debian"],
-    jars = ["netty/netty-all-4.1.34.Final.jar"],
+    jars = ["netty/netty-all-4.1.48.Final.jar"],
 )
 
 distrib_java_import(
@@ -618,11 +634,12 @@ java_import(
 
 java_import(
     name = "guava-testlib",
-    jars = ["guava/guava-testlib-25.1-jre.jar"],
+    jars = ["guava/guava-testlib-30.1.1-jre.jar"],
 )
 
-java_import(
+distrib_java_import(
     name = "junit4",
+    enable_distributions = ["debian"],
     jars = [
         "hamcrest/hamcrest-core-1.3.jar",
         "junit/junit-4.13.jar",
@@ -658,6 +675,7 @@ java_import(
     jars = ["truth/truth-1.0.1.jar"],
     exports = [
         ":truth8",
+        ":truth_proto",
     ],
     deps = [
         ":diffutils",
@@ -667,6 +685,14 @@ java_import(
 java_import(
     name = "truth8",
     jars = ["truth8/truth-java8-extension-1.0.1.jar"],
+)
+
+java_import(
+    name = "truth_proto",
+    jars = [
+        "truth_proto/truth-liteproto-extension-1.0.1.jar",
+        "truth_proto/truth-proto-extension-1.0.1.jar",
+    ],
 )
 
 distrib_java_import(

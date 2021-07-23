@@ -230,7 +230,8 @@ filegroup(
 )
 
 # libjacoco-java - BEGIN
-JACOCOVERSION = "0.8.3"
+JACOCOVERSION = "0.8.6"
+
 java_import(
     name = "agent",
     jars = ["org.jacoco.agent.jar"],
@@ -320,9 +321,9 @@ java_import(
 filegroup(
     name = "auto_value-jars",
     srcs = [
+        "auto-common.jar",
         "auto-value.jar",
         "auto-value-annotations.jar",
-        "auto-common.jar",
         "escapevelocity.jar",
         "javapoet.jar",
     ],
@@ -378,7 +379,7 @@ java_import(
     jars = ["java-diff-utils.jar"],
 )
 
-# opencensus-java
+# libopencensus-java
 java_import(
     name = "opencensus-api",
     jars = [
@@ -387,7 +388,7 @@ java_import(
     ],
 )
 
-# perfmark-java
+# libperfmark-java
 java_import(
     name = "perfmark-api",
     jars = [
@@ -395,7 +396,7 @@ java_import(
     ],
 )
 
-# google-flogger
+# libgoogle-flogger-java
 java_import(
     name = "flogger",
     jars = [
@@ -415,13 +416,13 @@ filegroup(
     ],
 )
 
-# checker-framework
+# libchecker-framework-java
 java_import(
     name = "checker_framework_annotations",
     jars = ["checker-qual.jar"],
 )
 
-# grpc-java
+# libgrpc-java
 java_import(
     name = "grpc-jar",
     jars = [":bootstrap-grpc-jars"],
@@ -447,5 +448,14 @@ filegroup(
         "grpc-protobuf.jar",
         "grpc-protobuf-lite.jar",
         "grpc-stub.jar",
+    ],
+)
+
+# junit4
+java_import(
+    name = "junit4",
+    jars = [
+        "hamcrest-core.jar",
+        "junit4.jar",
     ],
 )

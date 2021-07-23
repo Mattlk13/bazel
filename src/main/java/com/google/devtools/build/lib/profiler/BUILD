@@ -12,7 +12,7 @@ java_library(
     name = "profiler",
     srcs = [
         "AutoProfiler.java",
-        "CollectLocalCpuUsage.java",
+        "CollectLocalResourceUsage.java",
         "MemoryProfiler.java",
         "MetricData.java",
         "PredicateBasedStatRecorder.java",
@@ -29,6 +29,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/collect:extrema",
         "//src/main/java/com/google/devtools/build/lib/concurrent",
         "//src/main/java/com/google/devtools/common/options",
+        "//third_party:error_prone_annotations",
         "//third_party:gson",
         "//third_party:guava",
         "//third_party:jsr305",
@@ -52,16 +53,12 @@ java_library(
             "JsonProfile.java",
             "TraceEvent.java",
         ] + glob([
-            "analysis/*.java",
             "output/*.java",
             "statistics/*.java",
         ]),
     deps = [
         ":profiler",
-        "//src/main/java/com/google/devtools/build/lib/events",
         "//src/main/java/com/google/devtools/build/lib/util",
-        "//src/main/java/com/google/devtools/build/lib/util:var_int",
-        "//src/main/java/com/google/devtools/build/lib/vfs",
         "//third_party:auto_value",
         "//third_party:gson",
         "//third_party:guava",

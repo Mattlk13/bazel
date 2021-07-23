@@ -24,6 +24,7 @@ import com.google.devtools.build.lib.server.FailureDetails.RemoteExecution;
 import com.google.devtools.build.lib.server.FailureDetails.RemoteExecution.Code;
 import com.google.devtools.build.lib.util.OptionsUtils;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.common.options.Converter;
 import com.google.devtools.common.options.Converters;
 import com.google.devtools.common.options.Converters.AssignmentConverter;
 import com.google.devtools.common.options.EnumConverter;
@@ -32,12 +33,15 @@ import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
 import com.google.devtools.common.options.OptionMetadataTag;
 import com.google.devtools.common.options.OptionsBase;
+import com.google.devtools.common.options.OptionsParsingException;
 import com.google.protobuf.TextFormat;
 import com.google.protobuf.TextFormat.ParseException;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.SortedMap;
+import java.util.regex.Pattern;
 
 /** Options for remote execution and distributed caching. */
 public final class RemoteOptions extends OptionsBase {
@@ -70,10 +74,28 @@ public final class RemoteOptions extends OptionsBase {
       documentationCategory = OptionDocumentationCategory.REMOTE,
       effectTags = {OptionEffectTag.UNKNOWN},
       help =
-          "HOST or HOST:PORT of a remote execution endpoint.The supported schemas are grpc and"
-              + " grpcs (grpc with TLS enabled). If no schema is provided bazel'll default to"
-              + " grpcs. Specify grpc:// schema to disable TLS.")
+          "HOST or HOST:PORT of a remote execution endpoint. The supported schemas are grpc, "
+              + "grpcs (grpc with TLS enabled) and unix (local UNIX sockets). If no schema is "
+              + "provided Bazel will default to grpcs. Specify grpc:// or unix: schema to "
+              + "disable TLS.")
   public String remoteExecutor;
+
+  @Option(
+      name = "experimental_remote_execution_keepalive",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.REMOTE,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help = "Whether to use keepalive for remote execution calls.")
+  public boolean remoteExecutionKeepalive;
+
+  @Option(
+      name = "experimental_remote_capture_corrupted_outputs",
+      defaultValue = "null",
+      documentationCategory = OptionDocumentationCategory.REMOTE,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      converter = OptionsUtils.PathFragmentConverter.class,
+      help = "A path to a directory where the corrupted outputs will be captured to.")
+  public PathFragment remoteCaptureCorruptedOutputs;
 
   @Option(
       name = "remote_cache",
@@ -82,10 +104,10 @@ public final class RemoteOptions extends OptionsBase {
       documentationCategory = OptionDocumentationCategory.REMOTE,
       effectTags = {OptionEffectTag.UNKNOWN},
       help =
-          "A URI of a caching endpoint. The supported schemas are http, https, grpc and grpcs"
-              + " (grpc with TLS enabled). If no schema is provided bazel will default to grpcs."
-              + " Specify grpc:// or http:// schema to disable TLS.See"
-              + " https://docs.bazel.build/versions/master/remote-caching.html")
+          "A URI of a caching endpoint. The supported schemas are http, https, grpc, grpcs "
+              + "(grpc with TLS enabled) and unix (local UNIX sockets). If no schema is provided "
+              + "Bazel will default to grpcs. Specify grpc://, http:// or unix: schema to disable "
+              + "TLS. See https://docs.bazel.build/versions/main/remote-caching.html")
   public String remoteCache;
 
   @Option(
@@ -94,9 +116,10 @@ public final class RemoteOptions extends OptionsBase {
       documentationCategory = OptionDocumentationCategory.REMOTE,
       effectTags = {OptionEffectTag.UNKNOWN},
       help =
-          "A URI of a remote downloader endpoint. The supported schemas are grpc and grpcs"
-              + " (grpc with TLS enabled). If no schema is provided bazel will default to grpcs."
-              + " Specify grpc:// schema to disable TLS.")
+          "A Remote Asset API endpoint URI, to be used as a remote download proxy. The supported"
+              + " schemas are grpc, grpcs (grpc with TLS enabled) and unix (local UNIX sockets)."
+              + " If no schema is provided Bazel will default to grpcs. See: "
+              + "https://github.com/bazelbuild/remote-apis/blob/master/build/bazel/remote/asset/v1/remote_asset.proto")
   public String remoteDownloader;
 
   @Option(
@@ -156,13 +179,47 @@ public final class RemoteOptions extends OptionsBase {
 
   @Option(
       name = "remote_timeout",
-      defaultValue = "60",
+      defaultValue = "60s",
+      documentationCategory = OptionDocumentationCategory.REMOTE,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      converter = RemoteTimeoutConverter.class,
+      help =
+          "The maximum amount of time to wait for remote execution and cache calls. For the REST"
+              + " cache, this is both the connect and the read timeout. Following units can be"
+              + " used: Days (d), hours (h), minutes (m), seconds (s), and milliseconds (ms). If"
+              + " the unit is omitted, the value is interpreted as seconds.")
+  public Duration remoteTimeout;
+
+  @Option(
+      name = "remote_bytestream_uri_prefix",
+      defaultValue = "null",
       documentationCategory = OptionDocumentationCategory.REMOTE,
       effectTags = {OptionEffectTag.UNKNOWN},
       help =
-          "The maximum number of seconds to wait for remote execution and cache calls. For the "
-              + "REST cache, this is both the connect and the read timeout.")
-  public int remoteTimeout;
+          "The hostname and instance name to be used in bytestream:// URIs that are written into "
+              + "build event streams. This option can be set when builds are performed using a "
+              + "proxy, which causes the values of --remote_executor and --remote_instance_name "
+              + "to no longer correspond to the canonical name of the remote execution service. "
+              + "When not set, it will default to \"${hostname}/${instance_name}\".")
+  public String remoteBytestreamUriPrefix;
+
+  /** Returns the specified duration. Assumes seconds if unitless. */
+  public static class RemoteTimeoutConverter implements Converter<Duration> {
+    private static final Pattern UNITLESS_REGEX = Pattern.compile("^[0-9]+$");
+
+    @Override
+    public Duration convert(String input) throws OptionsParsingException {
+      if (UNITLESS_REGEX.matcher(input).matches()) {
+        input += "s";
+      }
+      return new Converters.DurationConverter().convert(input);
+    }
+
+    @Override
+    public String getTypeDescription() {
+      return "An immutable length of time.";
+    }
+  }
 
   @Option(
       name = "remote_accept_cached",
@@ -217,6 +274,19 @@ public final class RemoteOptions extends OptionsBase {
               + " cache, but not in the remote cache.\n"
               + "See #8216 for details.")
   public boolean incompatibleRemoteResultsIgnoreDisk;
+
+  @Option(
+      name = "incompatible_remote_output_paths_relative_to_input_root",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.REMOTE,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      metadataTags = {
+        OptionMetadataTag.INCOMPATIBLE_CHANGE,
+        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+      },
+      help =
+          "If set to true, output paths are relative to input root instead of working directory.")
+  public boolean incompatibleRemoteOutputPathsRelativeToInputRoot;
 
   @Option(
       name = "remote_instance_name",
@@ -432,6 +502,21 @@ public final class RemoteOptions extends OptionsBase {
           "If set to true, Bazel will compute the hash sum of all remote downloads and "
               + " discard the remotely cached values if they don't match the expected value.")
   public boolean remoteVerifyDownloads;
+
+  @Option(
+      name = "remote_download_symlink_template",
+      defaultValue = "",
+      category = "remote",
+      documentationCategory = OptionDocumentationCategory.OUTPUT_PARAMETERS,
+      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
+      help =
+          "Instead of downloading remote build outputs to the local machine, create symbolic "
+              + "links. The target of the symbolic links can be specified in the form of a "
+              + "template string. This template string may contain {hash} and {size_bytes} that "
+              + "expand to the hash of the object and the size in bytes, respectively. "
+              + "These symbolic links may, for example, point to a FUSE file system "
+              + "that loads objects from the CAS on demand.")
+  public String remoteDownloadSymlinkTemplate;
 
   // The below options are not configurable by users, only tests.
   // This is part of the effort to reduce the overall number of flags.

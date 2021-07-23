@@ -52,10 +52,12 @@ class PackageFactoryBuilderFactoryForBazelUnitTests implements BuilderFactoryFor
     public PackageFactory build(RuleClassProvider ruleClassProvider, FileSystem fs) {
       return new PackageFactory(
           ruleClassProvider,
+          PackageFactory.makeDefaultSizedForkJoinPoolForGlobbing(),
           environmentExtensions,
-          version,
+          VERSION,
           DefaultPackageSettings.INSTANCE,
           packageValidator,
+          packageOverheadEstimator,
           doChecksForTesting
               ? new BazelPackageLoadingListenerForTesting(
                   (ConfiguredRuleClassProvider) ruleClassProvider, directories)

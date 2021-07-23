@@ -16,6 +16,7 @@ package com.google.devtools.build.lib.skyframe;
 
 import static com.google.common.truth.Truth.assertThat;
 
+import com.google.common.base.Ascii;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -31,11 +32,10 @@ import com.google.devtools.build.lib.packages.PackageFactory.EnvironmentExtensio
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.WorkspaceFileValue;
 import com.google.devtools.build.lib.packages.WorkspaceFileValue.WorkspaceFileKey;
+import com.google.devtools.build.lib.packages.semantics.BuildLanguageOptions;
 import com.google.devtools.build.lib.rules.repository.ManagedDirectoriesKnowledgeImpl;
 import com.google.devtools.build.lib.rules.repository.ManagedDirectoriesKnowledgeImpl.ManagedDirectoriesListener;
 import com.google.devtools.build.lib.skyframe.util.SkyframeExecutorTestUtils;
-import com.google.devtools.build.lib.syntax.StarlarkSemantics;
-import com.google.devtools.build.lib.testutil.MoreAsserts;
 import com.google.devtools.build.lib.vfs.ModifiedFileSet;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -47,9 +47,15 @@ import com.google.devtools.build.skyframe.SkyFunctionName;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import javax.annotation.Nullable;
+import net.starlark.java.eval.StarlarkSemantics;
+import net.starlark.java.syntax.ParserInput;
+import net.starlark.java.syntax.StarlarkFile;
+import net.starlark.java.syntax.Statement;
 import org.hamcrest.BaseMatcher;
 import org.hamcrest.Description;
 import org.junit.Test;
@@ -76,7 +82,7 @@ public class WorkspaceFileFunctionTest extends BuildViewTestCase {
   }
 
   private static Label getLabelMapping(Package pkg, String name) throws NoSuchTargetException {
-    return (Label) ((Rule) pkg.getTarget(name)).getAttributeContainer().getAttr("actual");
+    return (Label) ((Rule) pkg.getTarget(name)).getAttr("actual");
   }
 
   private RootedPath createWorkspaceFile(String... contents) throws IOException {
@@ -122,7 +128,6 @@ public class WorkspaceFileFunctionTest extends BuildViewTestCase {
     scratch.file("BUILD", "");
     RootedPath workspace =
         createWorkspaceFile(
-            "WORKSPACE",
             "workspace(name = 'good')",
             "load('//:a.bzl', 'a')",
             "x = 1  #for chunk break",
@@ -145,7 +150,6 @@ public class WorkspaceFileFunctionTest extends BuildViewTestCase {
     scratch.file("BUILD", "");
     RootedPath workspace =
         createWorkspaceFile(
-            "WORKSPACE",
             "workspace(name = 'good')",
             "load('//:a.bzl', 'a')",
             "x = 1  #for chunk break",
@@ -196,12 +200,6 @@ public class WorkspaceFileFunctionTest extends BuildViewTestCase {
     StarlarkSemantics semantics = getStarlarkSemantics();
     Injectable injectable = getSkyframeExecutor().injectable();
     try {
-      StarlarkSemantics semanticsWithManagedDirectories =
-          StarlarkSemantics.builderWithDefaults()
-              .experimentalAllowIncrementalRepositoryUpdates(true)
-              .build();
-      PrecomputedValue.STARLARK_SEMANTICS.set(injectable, semanticsWithManagedDirectories);
-
       TestManagedDirectoriesListener listener = new TestManagedDirectoriesListener();
       ManagedDirectoriesKnowledgeImpl knowledge = new ManagedDirectoriesKnowledgeImpl(listener);
 
@@ -253,13 +251,10 @@ public class WorkspaceFileFunctionTest extends BuildViewTestCase {
     StarlarkSemantics semantics = getStarlarkSemantics();
     Injectable injectable = getSkyframeExecutor().injectable();
     try {
-      StarlarkSemantics semanticsWithManagedDirectories =
-          StarlarkSemantics.builderWithDefaults()
-              .experimentalAllowIncrementalRepositoryUpdates(true)
-              .build();
-      PrecomputedValue.STARLARK_SEMANTICS.set(injectable, semanticsWithManagedDirectories);
-
       createWorkspaceFileValueForTest();
+
+      // Test intentionally introduces errors.
+      reporter.removeHandler(failFastHandler);
 
       assertManagedDirectoriesParsingError(
           "{'@repo1': 'dir1', '@repo2': ['dir3']}",
@@ -284,7 +279,7 @@ public class WorkspaceFileFunctionTest extends BuildViewTestCase {
           "managed_directories attribute should not contain multiple (or duplicate)"
               + " repository mappings for the same directory ('a/b').");
       assertManagedDirectoriesParsingError(
-          "{'@repo1': [], '@repo1': [] }", "Duplicated key \"@repo1\" when creating dictionary");
+          "{'@repo1': [], '@repo1': [] }", "dictionary expression has duplicate key: \"@repo1\"");
       assertManagedDirectoriesParsingError(
           "{'@repo1': ['a/b'], '@repo2': ['a/b/c/..'] }",
           "managed_directories attribute should not contain multiple (or duplicate)"
@@ -340,7 +335,7 @@ public class WorkspaceFileFunctionTest extends BuildViewTestCase {
     Package pkg = workspaceFileValue.getPackage();
     if (pkg.containsErrors()) {
       throw new RuntimeException(
-          Preconditions.checkNotNull(Iterables.getFirst(pkg.getEvents(), null)).getMessage());
+          Preconditions.checkNotNull(Iterables.getFirst(eventCollector, null)).getMessage());
     }
     return workspaceFileValue;
   }
@@ -350,7 +345,7 @@ public class WorkspaceFileFunctionTest extends BuildViewTestCase {
     WorkspaceFileValue workspaceFileValue = parseWorkspaceFileValueImpl(lines);
     Package pkg = workspaceFileValue.getPackage();
     assertThat(pkg.containsErrors()).isTrue();
-    MoreAsserts.assertContainsEvent(pkg.getEvents(), expectedError);
+    assertContainsEvent(expectedError);
   }
 
   private WorkspaceFileValue parseWorkspaceFileValueImpl(String[] lines)
@@ -363,64 +358,73 @@ public class WorkspaceFileFunctionTest extends BuildViewTestCase {
 
   @Test
   public void testInvalidRepo() throws Exception {
-    RootedPath workspacePath = createWorkspaceFile("workspace(name = 'foo$')");
-    SkyKey key = ExternalPackageFunction.key(workspacePath);
+    // Test intentionally introduces errors.
+    reporter.removeHandler(failFastHandler);
+
+    createWorkspaceFile("workspace(name = 'foo$')");
+    SkyKey key = ExternalPackageFunction.key();
     EvaluationResult<PackageValue> evaluationResult = eval(key);
     Package pkg = evaluationResult.get(key).getPackage();
     assertThat(pkg.containsErrors()).isTrue();
-    MoreAsserts.assertContainsEvent(pkg.getEvents(), "foo$ is not a legal workspace name");
+    assertContainsEvent("foo$ is not a legal workspace name");
   }
 
   @Test
   public void testBindFunction() throws Exception {
     String[] lines = {"bind(name = 'foo/bar',", "actual = '//foo:bar')"};
-    RootedPath workspacePath = createWorkspaceFile(lines);
+    createWorkspaceFile(lines);
 
-    SkyKey key = ExternalPackageFunction.key(workspacePath);
+    SkyKey key = ExternalPackageFunction.key();
     EvaluationResult<PackageValue> evaluationResult = eval(key);
     Package pkg = evaluationResult.get(key).getPackage();
     assertThat(getLabelMapping(pkg, "foo/bar"))
         .isEqualTo(Label.parseAbsolute("//foo:bar", ImmutableMap.of()));
-    MoreAsserts.assertNoEvents(pkg.getEvents());
+    assertNoEvents();
   }
 
   @Test
   public void testBindArgsReversed() throws Exception {
     String[] lines = {"bind(actual = '//foo:bar', name = 'foo/bar')"};
-    RootedPath workspacePath = createWorkspaceFile(lines);
+    createWorkspaceFile(lines);
 
-    SkyKey key = ExternalPackageFunction.key(workspacePath);
+    SkyKey key = ExternalPackageFunction.key();
     EvaluationResult<PackageValue> evaluationResult = eval(key);
     Package pkg = evaluationResult.get(key).getPackage();
     assertThat(getLabelMapping(pkg, "foo/bar"))
         .isEqualTo(Label.parseAbsolute("//foo:bar", ImmutableMap.of()));
-    MoreAsserts.assertNoEvents(pkg.getEvents());
+    assertNoEvents();
   }
 
   @Test
   public void testNonExternalBinding() throws Exception {
+    // Test intentionally introduces errors.
+    reporter.removeHandler(failFastHandler);
+
     // name must be a valid label name.
     String[] lines = {"bind(name = 'foo:bar', actual = '//bar/baz')"};
-    RootedPath workspacePath = createWorkspaceFile(lines);
+    createWorkspaceFile(lines);
 
-    SkyKey key = ExternalPackageFunction.key(workspacePath);
+    SkyKey key = ExternalPackageFunction.key();
     EvaluationResult<PackageValue> evaluationResult = eval(key);
     Package pkg = evaluationResult.get(key).getPackage();
     assertThat(pkg.containsErrors()).isTrue();
-    MoreAsserts.assertContainsEvent(pkg.getEvents(), "target names may not contain ':'");
+    assertContainsEvent("target names may not contain ':'");
   }
 
   @Test
   public void testWorkspaceFileParsingError() throws Exception {
+    // Test intentionally introduces errors.
+    reporter.removeHandler(failFastHandler);
+
     // //external:bar:baz is not a legal package.
     String[] lines = {"bind(name = 'foo/bar', actual = '//external:bar:baz')"};
-    RootedPath workspacePath = createWorkspaceFile(lines);
+    createWorkspaceFile(lines);
 
-    SkyKey key = ExternalPackageFunction.key(workspacePath);
+    SkyKey key = ExternalPackageFunction.key();
     EvaluationResult<PackageValue> evaluationResult = eval(key);
     Package pkg = evaluationResult.get(key).getPackage();
     assertThat(pkg.containsErrors()).isTrue();
-    MoreAsserts.assertContainsEvent(pkg.getEvents(), "target names may not contain ':'");
+    assertContainsEvent("target names may not contain ':'");
   }
 
   @Test
@@ -429,11 +433,11 @@ public class WorkspaceFileFunctionTest extends BuildViewTestCase {
     RootedPath workspacePath = createWorkspaceFile();
     workspacePath.asPath().delete();
 
-    SkyKey key = ExternalPackageFunction.key(workspacePath);
+    SkyKey key = ExternalPackageFunction.key();
     EvaluationResult<PackageValue> evaluationResult = eval(key);
     Package pkg = evaluationResult.get(key).getPackage();
     assertThat(pkg.containsErrors()).isFalse();
-    MoreAsserts.assertNoEvents(pkg.getEvents());
+    assertNoEvents();
   }
 
   @Test
@@ -441,14 +445,14 @@ public class WorkspaceFileFunctionTest extends BuildViewTestCase {
     String[] lines = {
       "L = ['foo', 'bar']", "bind(name = '%s/%s' % (L[0], L[1]),", "actual = '//foo:bar')"
     };
-    RootedPath workspacePath = createWorkspaceFile(lines);
+    createWorkspaceFile(lines);
 
-    SkyKey key = ExternalPackageFunction.key(workspacePath);
+    SkyKey key = ExternalPackageFunction.key();
     EvaluationResult<PackageValue> evaluationResult = eval(key);
     Package pkg = evaluationResult.get(key).getPackage();
     assertThat(getLabelMapping(pkg, "foo/bar"))
         .isEqualTo(Label.parseAbsolute("//foo:bar", ImmutableMap.of()));
-    MoreAsserts.assertNoEvents(pkg.getEvents());
+    assertNoEvents();
   }
 
   @Test
@@ -477,7 +481,9 @@ public class WorkspaceFileFunctionTest extends BuildViewTestCase {
 
     try {
       StarlarkSemantics semanticsWithNinjaActions =
-          StarlarkSemantics.builderWithDefaults().experimentalNinjaActions(true).build();
+          StarlarkSemantics.builder()
+              .setBool(BuildLanguageOptions.EXPERIMENTAL_NINJA_ACTIONS, true)
+              .build();
       PrecomputedValue.STARLARK_SEMANTICS.set(injectable, semanticsWithNinjaActions);
 
       assertThat(
@@ -495,6 +501,9 @@ public class WorkspaceFileFunctionTest extends BuildViewTestCase {
               parseWorkspaceFileValue("toplevel_output_directories(paths = [])")
                   .getDoNotSymlinkInExecrootPaths())
           .isEmpty();
+
+      // Test now intentionally introduces errors.
+      reporter.removeHandler(failFastHandler);
 
       parseWorkspaceFileValueWithError(
           "toplevel_output_directories should not "
@@ -516,6 +525,24 @@ public class WorkspaceFileFunctionTest extends BuildViewTestCase {
     } finally {
       PrecomputedValue.STARLARK_SEMANTICS.set(injectable, semantics);
     }
+  }
+
+  @Test
+  public void testMangledExternalWorkspaceFileIsIgnored() throws Exception {
+    scratch.file("secondary/WORKSPACE", "garbage");
+    RootedPath workspace =
+        createWorkspaceFile(
+            "workspace(name = 'good')",
+            "local_repository(name = \"secondary\", path = \"./secondary/\")");
+
+    SkyKey key1 = WorkspaceFileValue.key(workspace, 1);
+    EvaluationResult<WorkspaceFileValue> result1 = eval(key1);
+    WorkspaceFileValue value1 = result1.get(key1);
+    RepositoryName good = RepositoryName.create("@good");
+    RepositoryName main = RepositoryName.create("@");
+    RepositoryName secondary = RepositoryName.create("@secondary");
+    assertThat(value1.getRepositoryMapping()).containsEntry(secondary, ImmutableMap.of(good, main));
+    assertNoEvents();
   }
 
   private static class TestManagedDirectoriesKnowledge implements ManagedDirectoriesKnowledge {
@@ -569,5 +596,125 @@ public class WorkspaceFileFunctionTest extends BuildViewTestCase {
     public void reset() {
       repositoryNames = null;
     }
+  }
+
+  // tests of splitChunks, an internal helper function
+
+  @Test
+  public void testChunksNoLoad() {
+    assertThat(split(parse("foo_bar = 1"))).isEqualTo("[(assignment)]");
+  }
+
+  @Test
+  public void testChunksOneLoadAtTop() {
+    assertThat(
+            split(
+                parse(
+                    "load('//:foo.bzl', 'bar')", //
+                    "foo_bar = 1")))
+        .isEqualTo("[(load assignment)]");
+  }
+
+  @Test
+  public void testChunksOneLoad() {
+    assertThat(
+            split(
+                parse(
+                    "foo_bar = 1",
+                    //
+                    "load('//:foo.bzl', 'bar')")))
+        .isEqualTo("[(assignment)][(load)]");
+  }
+
+  @Test
+  public void testChunksTwoSuccessiveLoads() {
+    assertThat(
+            split(
+                parse(
+                    "foo_bar = 1",
+                    //
+                    "load('//:foo.bzl', 'bar')",
+                    "load('//:bar.bzl', 'foo')")))
+        .isEqualTo("[(assignment)][(load load)]");
+  }
+
+  @Test
+  public void testChunksTwoSucessiveLoadsWithNonLoadStatement() {
+    assertThat(
+            split(
+                parse(
+                    "foo_bar = 1",
+                    //
+                    "load('//:foo.bzl', 'bar')",
+                    "load('//:bar.bzl', 'foo')",
+                    "local_repository(name = 'foobar', path = '/bar/foo')")))
+        .isEqualTo("[(assignment)][(load load expression)]");
+  }
+
+  @Test
+  public void testChunksThreeLoadsThreeSegments() {
+    assertThat(
+            split(
+                parse(
+                    "foo_bar = 1",
+                    //
+                    "load('//:foo.bzl', 'bar')",
+                    "load('//:bar.bzl', 'foo')",
+                    "local_repository(name = 'foobar', path = '/bar/foo')",
+                    //
+                    "load('@foobar//:baz.bzl', 'bleh')")))
+        .isEqualTo("[(assignment)][(load load expression)][(load)]");
+  }
+
+  @Test
+  public void testChunksThreeLoadsThreeSegmentsWithContent() {
+    assertThat(
+            split(
+                parse(
+                    "foo_bar = 1",
+                    //
+                    "load('//:foo.bzl', 'bar')",
+                    "load('//:bar.bzl', 'foo')",
+                    "local_repository(name = 'foobar', path = '/bar/foo')",
+                    //
+                    "load('@foobar//:baz.bzl', 'bleh')",
+                    "bleh()")))
+        .isEqualTo("[(assignment)][(load load expression)][(load expression)]");
+  }
+
+  @Test
+  public void testChunksMaySpanFiles() {
+    assertThat(
+            split(
+                parse(
+                    "x = 1", //
+                    "load('m', 'y')"),
+                parse(
+                    "z = 1", //
+                    "load('m', 'y2')")))
+        .isEqualTo("[(assignment)][(load)(assignment)][(load)]");
+  }
+
+  // Returns a string that indicates the breakdown of statements into chunks.
+  private static String split(StarlarkFile... files) {
+    StringBuilder buf = new StringBuilder();
+    for (List<StarlarkFile> chunk : WorkspaceFileFunction.splitChunks(Arrays.asList(files))) {
+      buf.append('[');
+      for (StarlarkFile partialFile : chunk) {
+        buf.append('(');
+        String sep = "";
+        for (Statement stmt : partialFile.getStatements()) {
+          buf.append(sep).append(Ascii.toLowerCase(stmt.kind().toString()));
+          sep = " ";
+        }
+        buf.append(')');
+      }
+      buf.append(']');
+    }
+    return buf.toString();
+  }
+
+  private static StarlarkFile parse(String... lines) {
+    return StarlarkFile.parse(ParserInput.fromLines(lines));
   }
 }

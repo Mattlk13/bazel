@@ -20,10 +20,13 @@ import static com.google.devtools.build.lib.packages.Type.STRING;
 import static com.google.devtools.build.lib.packages.Type.STRING_LIST;
 
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.docgen.annot.DocCategory;
 import com.google.devtools.build.lib.analysis.BaseRuleClasses;
 import com.google.devtools.build.lib.analysis.starlark.StarlarkAttrModule.Descriptor;
+import com.google.devtools.build.lib.bazel.bzlmod.BzlmodRepoRuleCreator;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
+import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.packages.AttributeValueSource;
 import com.google.devtools.build.lib.packages.BazelModuleContext;
 import com.google.devtools.build.lib.packages.BazelStarlarkContext;
@@ -34,20 +37,27 @@ import com.google.devtools.build.lib.packages.PackageFactory.PackageContext;
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
+import com.google.devtools.build.lib.packages.RuleFactory;
+import com.google.devtools.build.lib.packages.RuleFactory.BuildLangTypedAttributeValuesMap;
 import com.google.devtools.build.lib.packages.RuleFactory.InvalidRuleException;
 import com.google.devtools.build.lib.packages.StarlarkExportable;
 import com.google.devtools.build.lib.packages.WorkspaceFactoryHelper;
-import com.google.devtools.build.lib.skylarkbuildapi.repository.RepositoryModuleApi;
-import com.google.devtools.build.lib.syntax.Dict;
-import com.google.devtools.build.lib.syntax.EvalException;
-import com.google.devtools.build.lib.syntax.Module;
-import com.google.devtools.build.lib.syntax.Printer;
-import com.google.devtools.build.lib.syntax.Sequence;
-import com.google.devtools.build.lib.syntax.Starlark;
-import com.google.devtools.build.lib.syntax.StarlarkCallable;
-import com.google.devtools.build.lib.syntax.StarlarkThread;
-import com.google.devtools.build.lib.syntax.Tuple;
+import com.google.devtools.build.lib.packages.semantics.BuildLanguageOptions;
+import com.google.devtools.build.lib.starlarkbuildapi.repository.RepositoryModuleApi;
 import java.util.Map;
+import net.starlark.java.annot.StarlarkBuiltin;
+import net.starlark.java.eval.Dict;
+import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.Module;
+import net.starlark.java.eval.Printer;
+import net.starlark.java.eval.Sequence;
+import net.starlark.java.eval.Starlark;
+import net.starlark.java.eval.StarlarkCallable;
+import net.starlark.java.eval.StarlarkSemantics;
+import net.starlark.java.eval.StarlarkThread;
+import net.starlark.java.eval.StarlarkThread.CallStackEntry;
+import net.starlark.java.eval.Tuple;
+import net.starlark.java.syntax.Location;
 
 /**
  * The Starlark module containing the definition of {@code repository_rule} function to define a
@@ -77,12 +87,11 @@ public class StarlarkRepositoryModule implements RepositoryModuleApi {
 
     builder.addAttribute(attr("$local", BOOLEAN).defaultValue(local).build());
     builder.addAttribute(attr("$configure", BOOLEAN).defaultValue(configure).build());
-    if (thread.getSemantics().experimentalRepoRemoteExec()) {
+    if (thread.getSemantics().getBool(BuildLanguageOptions.EXPERIMENTAL_REPO_REMOTE_EXEC)) {
       builder.addAttribute(attr("$remotable", BOOLEAN).defaultValue(remotable).build());
       BaseRuleClasses.execPropertiesAttribute(builder);
     }
     builder.addAttribute(attr("$environ", STRING_LIST).defaultValue(environ).build());
-    BaseRuleClasses.nameAttribute(builder);
     BaseRuleClasses.commonCoreAndStarlarkAttributes(builder);
     builder.add(attr("expect_failure", STRING));
     if (attrs != Starlark.NONE) {
@@ -109,8 +118,14 @@ public class StarlarkRepositoryModule implements RepositoryModuleApi {
 
   // RepositoryRuleFunction is the result of repository_rule(...).
   // It is a callable value; calling it yields a Rule instance.
+  @StarlarkBuiltin(
+      name = "repository_rule",
+      category = DocCategory.BUILTIN,
+      doc =
+          "A callable value that may be invoked during evaluation of the WORKSPACE file to"
+              + " instantiate and return a repository rule.")
   private static final class RepositoryRuleFunction
-      implements StarlarkCallable, StarlarkExportable {
+      implements StarlarkCallable, StarlarkExportable, BzlmodRepoRuleCreator {
     private final RuleClass.Builder builder;
     private final StarlarkCallable implementation;
     private Label extensionLabel;
@@ -132,7 +147,7 @@ public class StarlarkRepositoryModule implements RepositoryModuleApi {
     }
 
     @Override
-    public void export(Label extensionLabel, String exportedName) {
+    public void export(EventHandler handler, Label extensionLabel, String exportedName) {
       this.extensionLabel = extensionLabel;
       this.exportedName = exportedName;
     }
@@ -152,10 +167,11 @@ public class StarlarkRepositoryModule implements RepositoryModuleApi {
     }
 
     @Override
-    public Object call(StarlarkThread thread, Tuple<Object> args, Dict<String, Object> kwargs)
+    public Object call(StarlarkThread thread, Tuple args, Dict<String, Object> kwargs)
         throws EvalException, InterruptedException {
+      BazelStarlarkContext.from(thread).checkWorkspacePhase("repository rule " + exportedName);
       if (!args.isEmpty()) {
-        throw new EvalException(null, "unexpected positional arguments");
+        throw new EvalException("unexpected positional arguments");
       }
       String ruleClassName;
       // If the function ever got exported (the common case), we take the name
@@ -172,7 +188,7 @@ public class StarlarkRepositoryModule implements RepositoryModuleApi {
         // now many projects create and instantiate repository_rules without an
         // intervening export; see b/111199163. An incompatible flag is required.
         if (false) {
-          throw new EvalException(null, "attempt to instantiate a non-exported repository rule");
+          throw new EvalException("attempt to instantiate a non-exported repository rule");
         }
 
         // The historical workaround was a fragile hack to introspect on the call
@@ -203,12 +219,31 @@ public class StarlarkRepositoryModule implements RepositoryModuleApi {
         throw Starlark.errorf("%s", e.getMessage());
       }
     }
+
+    @Override
+    public Rule createRule(
+        Package.Builder packageBuilder,
+        StarlarkSemantics semantics,
+        Map<String, Object> kwargs,
+        EventHandler handler)
+        throws InterruptedException, InvalidRuleException {
+      RuleClass ruleClass = builder.build(exportedName, exportedName);
+      BuildLangTypedAttributeValuesMap attributeValues =
+          new BuildLangTypedAttributeValuesMap(kwargs);
+      ImmutableList.Builder<CallStackEntry> callStack = ImmutableList.builder();
+      // TODO(pcloudy): Optimize the callstack
+      callStack.add(new CallStackEntry("RepositoryRuleFunction.createRule", Location.BUILTIN));
+      return RuleFactory.createRule(
+          packageBuilder, ruleClass, attributeValues, handler, semantics, callStack.build());
+    }
   }
 
   @Override
   public void failWithIncompatibleUseCcConfigureFromRulesCc(StarlarkThread thread)
       throws EvalException {
-    if (thread.getSemantics().incompatibleUseCcConfigureFromRulesCc()) {
+    if (thread
+        .getSemantics()
+        .getBool(BuildLanguageOptions.INCOMPATIBLE_USE_CC_CONFIGURE_FROM_RULES_CC)) {
       throw Starlark.errorf(
           "Incompatible flag "
               + "--incompatible_use_cc_configure_from_rules_cc has been flipped. Please use "

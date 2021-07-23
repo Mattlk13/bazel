@@ -21,7 +21,7 @@ import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.NativeInfo;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
-import com.google.devtools.build.lib.skylarkbuildapi.test.InstrumentedFilesInfoApi;
+import com.google.devtools.build.lib.starlarkbuildapi.test.InstrumentedFilesInfoApi;
 import com.google.devtools.build.lib.util.Pair;
 
 /** An implementation class for the InstrumentedFilesProvider interface. */
@@ -57,7 +57,6 @@ public final class InstrumentedFilesInfo extends NativeInfo implements Instrumen
       NestedSet<Artifact> coverageSupportFiles,
       NestedSet<Pair<String, String>> coverageEnvironment,
       NestedSet<Pair<String, String>> reportedToActualSources) {
-    super(STARLARK_CONSTRUCTOR);
     this.instrumentedFiles = instrumentedFiles;
     this.instrumentationMetadataFiles = instrumentationMetadataFiles;
     this.baselineCoverageFiles = baselineCoverageFiles;

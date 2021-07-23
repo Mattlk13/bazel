@@ -43,9 +43,9 @@ public class CoverageReportFunction implements SkyFunction {
   public SkyValue compute(SkyKey skyKey, Environment env) throws InterruptedException {
     Preconditions.checkState(
         CoverageReportValue.COVERAGE_REPORT_KEY.equals(skyKey),
-        String.format(
-            "Expected %s for SkyKey but got %s instead",
-            CoverageReportValue.COVERAGE_REPORT_KEY, skyKey));
+        "Expected %s for SkyKey but got %s instead",
+        CoverageReportValue.COVERAGE_REPORT_KEY,
+        skyKey);
 
     ImmutableList<ActionAnalysisMetadata> actions = COVERAGE_REPORT_KEY.get(env);
     if (actions == null) {
@@ -56,7 +56,6 @@ public class CoverageReportFunction implements SkyFunction {
     try {
       generatingActions =
           Actions.assignOwnersAndFilterSharedActionsAndThrowActionConflict(
-              env.getListener(),
               actionKeyContext,
               actions,
               CoverageReportValue.COVERAGE_REPORT_KEY,

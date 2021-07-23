@@ -27,6 +27,7 @@ import com.google.devtools.build.lib.actions.CommandLineExpansionException;
 import com.google.devtools.build.lib.analysis.AnalysisProtosV2;
 import com.google.devtools.build.lib.analysis.AspectValue;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.ConfiguredTargetValue;
 import com.google.devtools.build.lib.analysis.actions.ParameterFileWriteAction;
 import com.google.devtools.build.lib.analysis.actions.SpawnAction;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget;
@@ -35,30 +36,28 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.packages.AspectDescriptor;
 import com.google.devtools.build.lib.query2.aquery.AqueryActionFilter;
 import com.google.devtools.build.lib.query2.aquery.AqueryUtils;
-import com.google.devtools.build.lib.skyframe.ConfiguredTargetValue;
+import com.google.devtools.build.lib.skyframe.RuleConfiguredTargetValue;
 import com.google.devtools.build.lib.util.Pair;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import javax.annotation.Nullable;
 
 /**
  * Encapsulates necessary functionality to dump the current skyframe state of the action graph to
  * proto format.
  */
 public class ActionGraphDump {
-
   private final ActionKeyContext actionKeyContext = new ActionKeyContext();
   private final Set<String> actionGraphTargets;
-
-  private final KnownRuleClassStrings knownRuleClassStrings;
   private final KnownArtifacts knownArtifacts;
   private final KnownConfigurations knownConfigurations;
   private final KnownNestedSets knownNestedSets;
   private final KnownAspectDescriptors knownAspectDescriptors;
   private final KnownTargets knownTargets;
-  private final AqueryActionFilter actionFilters;
+  @Nullable private final AqueryActionFilter actionFilters;
   private final boolean includeActionCmdLine;
   private final boolean includeArtifacts;
   private final boolean includeParamFiles;
@@ -71,6 +70,7 @@ public class ActionGraphDump {
       boolean includeArtifacts,
       AqueryActionFilter actionFilters,
       boolean includeParamFiles,
+      boolean deduplicateDepsets,
       AqueryOutputHandler aqueryOutputHandler) {
     this(
         /* actionGraphTargets= */ ImmutableList.of("..."),
@@ -78,6 +78,7 @@ public class ActionGraphDump {
         includeArtifacts,
         actionFilters,
         includeParamFiles,
+        deduplicateDepsets,
         aqueryOutputHandler);
   }
 
@@ -87,6 +88,7 @@ public class ActionGraphDump {
       boolean includeArtifacts,
       AqueryActionFilter actionFilters,
       boolean includeParamFiles,
+      boolean deduplicateDepsets,
       AqueryOutputHandler aqueryOutputHandler) {
     this.actionGraphTargets = ImmutableSet.copyOf(actionGraphTargets);
     this.includeActionCmdLine = includeActionCmdLine;
@@ -95,10 +97,10 @@ public class ActionGraphDump {
     this.includeParamFiles = includeParamFiles;
     this.aqueryOutputHandler = aqueryOutputHandler;
 
-    knownRuleClassStrings = new KnownRuleClassStrings(aqueryOutputHandler);
+    KnownRuleClassStrings knownRuleClassStrings = new KnownRuleClassStrings(aqueryOutputHandler);
     knownArtifacts = new KnownArtifacts(aqueryOutputHandler);
     knownConfigurations = new KnownConfigurations(aqueryOutputHandler);
-    knownNestedSets = new KnownNestedSets(aqueryOutputHandler, knownArtifacts);
+    knownNestedSets = new KnownNestedSets(aqueryOutputHandler, knownArtifacts, deduplicateDepsets);
     knownAspectDescriptors = new KnownAspectDescriptors(aqueryOutputHandler);
     knownTargets = new KnownTargets(aqueryOutputHandler, knownRuleClassStrings);
   }
@@ -116,7 +118,7 @@ public class ActionGraphDump {
   }
 
   private void dumpSingleAction(ConfiguredTarget configuredTarget, ActionAnalysisMetadata action)
-      throws CommandLineExpansionException, IOException {
+      throws CommandLineExpansionException, InterruptedException, IOException {
 
     // Store the content of param files.
     if (includeParamFiles && (action instanceof ParameterFileWriteAction)) {
@@ -127,7 +129,7 @@ public class ActionGraphDump {
       getParamFileNameToContentMap().put(paramFileExecPath, fileContent);
     }
 
-    if (!AqueryUtils.matchesAqueryFilters(action, actionFilters)) {
+    if (actionFilters != null && !AqueryUtils.matchesAqueryFilters(action, actionFilters)) {
       return;
     }
 
@@ -202,6 +204,9 @@ public class ActionGraphDump {
     if (actionOwner != null) {
       BuildEvent event = actionOwner.getConfiguration();
       actionBuilder.setConfigurationId(knownConfigurations.dataToIdAndStreamOutputProto(event));
+      if (actionOwner.getExecutionPlatform() != null) {
+        actionBuilder.setExecutionPlatform(actionOwner.getExecutionPlatform().label().toString());
+      }
 
       // Store aspects.
       // Iterate through the aspect path and dump the aspect descriptors.
@@ -234,7 +239,7 @@ public class ActionGraphDump {
   }
 
   public void dumpAspect(AspectValue aspectValue, ConfiguredTargetValue configuredTargetValue)
-      throws CommandLineExpansionException, IOException {
+      throws CommandLineExpansionException, InterruptedException, IOException {
     ConfiguredTarget configuredTarget = configuredTargetValue.getConfiguredTarget();
     if (!includeInActionGraph(configuredTarget.getLabel().toString())) {
       return;
@@ -244,8 +249,8 @@ public class ActionGraphDump {
     }
   }
 
-  public void dumpConfiguredTarget(ConfiguredTargetValue configuredTargetValue)
-      throws CommandLineExpansionException, IOException {
+  public void dumpConfiguredTarget(RuleConfiguredTargetValue configuredTargetValue)
+      throws CommandLineExpansionException, InterruptedException, IOException {
     ConfiguredTarget configuredTarget = configuredTargetValue.getConfiguredTarget();
     if (!includeInActionGraph(configuredTarget.getLabel().toString())) {
       return;

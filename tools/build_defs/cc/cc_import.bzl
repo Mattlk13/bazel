@@ -121,15 +121,6 @@ def _create_archive_action(
         mnemonic = "CppArchive",
     )
 
-def _get_no_pic_and_pic_static_library(static_library):
-    if static_library == None:
-        return (None, None)
-
-    if static_library.extension == ".pic.a":
-        return (None, static_library)
-    else:
-        return (static_library, None)
-
 def _cc_import_impl(ctx):
     cc_toolchain = find_cpp_toolchain(ctx)
     cc_common.check_experimental_starlark_cc_import(
@@ -149,33 +140,27 @@ def _cc_import_impl(ctx):
         ctx.file.interface_library,
     )
 
-    (no_pic_static_library, pic_static_library) = _get_no_pic_and_pic_static_library(
-        ctx.file.static_library,
-    )
-
-    output_file = None
-    object_files = None
+    pic_static_library = ctx.file.pic_static_library or None
+    static_library = ctx.file.static_library or None
 
     if ctx.files.pic_objects and not pic_static_library:
         lib_name = "lib" + ctx.label.name + ".pic.a"
         pic_static_library = ctx.actions.declare_file(lib_name)
-        output_file = pic_static_library
-        object_files = ctx.files.pic_objects
+        _create_archive_action(ctx, feature_configuration, cc_toolchain, pic_static_library, ctx.files.pic_objects)
 
-    if ctx.files.objects and not no_pic_static_library:
+    if ctx.files.objects and not static_library:
         lib_name = "lib" + ctx.label.name + ".a"
-        no_pic_static_library = ctx.actions.declare_file(lib_name)
-        output_file = no_pic_static_library
-        object_files = ctx.files.objects
+        static_library = ctx.actions.declare_file(lib_name)
+        _create_archive_action(ctx, feature_configuration, cc_toolchain, static_library, ctx.files.objects)
 
     library_to_link = cc_common.create_library_to_link(
         actions = ctx.actions,
         feature_configuration = feature_configuration,
         cc_toolchain = ctx.attr._cc_toolchain[cc_common.CcToolchainInfo],
-        static_library = no_pic_static_library,
+        static_library = static_library,
         pic_static_library = pic_static_library,
-        dynamic_library = ctx.file.shared_library,
         interface_library = ctx.file.interface_library,
+        dynamic_library = ctx.file.shared_library,
         pic_objects = ctx.files.pic_objects,
         objects = ctx.files.objects,
         alwayslink = ctx.attr.alwayslink,
@@ -200,17 +185,42 @@ def _cc_import_impl(ctx):
         name = ctx.label.name,
     )
 
-    if output_file:
-        _create_archive_action(ctx, feature_configuration, cc_toolchain, output_file, object_files)
+    this_cc_info = CcInfo(compilation_context = compilation_context, linking_context = linking_context)
+    cc_infos = [this_cc_info]
 
-    return [CcInfo(compilation_context = compilation_context, linking_context = linking_context)]
+    for dep in ctx.attr.deps:
+        cc_infos.append(dep[CcInfo])
+    merged_cc_info = cc_common.merge_cc_infos(cc_infos = cc_infos)
+
+    runfiles = ctx.runfiles(files = ctx.files.data)
+
+    transitive_runfiles_list = []
+    if ctx.attr.static_library:
+        transitive_runfiles_list.append(ctx.attr.static_library[DefaultInfo].default_runfiles)
+    if ctx.attr.pic_static_library:
+        transitive_runfiles_list.append(ctx.attr.pic_static_library[DefaultInfo].default_runfiles)
+    if ctx.attr.shared_library:
+        transitive_runfiles_list.append(ctx.attr.shared_library[DefaultInfo].default_runfiles)
+    if ctx.attr.interface_library:
+        transitive_runfiles_list.append(ctx.attr.interface_library[DefaultInfo].default_runfiles)
+    for dep in ctx.attr.deps:
+        transitive_runfiles_list.append(dep[DefaultInfo].default_runfiles)
+
+    for maybe_runfiles in transitive_runfiles_list:
+        if maybe_runfiles:
+            runfiles = runfiles.merge(maybe_runfiles)
+
+    default_info = DefaultInfo(runfiles = runfiles)
+
+    return [merged_cc_info, default_info]
 
 cc_import = rule(
     implementation = _cc_import_impl,
     attrs = {
         "hdrs": attr.label_list(allow_files = [".h"]),
-        "static_library": attr.label(allow_single_file = [".a", ".lib", ".pic.a"]),
-        "shared_library": attr.label(allow_single_file = True),
+        "static_library": attr.label(allow_single_file = [".a", ".lib"]),
+        "pic_static_library": attr.label(allow_single_file = [".pic.a", ".pic.lib"]),
+        "shared_library": attr.label(allow_single_file = [".so", ".dll", ".dylib"]),
         "interface_library": attr.label(
             allow_single_file = [".ifso", ".tbd", ".lib", ".so", ".dylib"],
         ),
@@ -224,8 +234,11 @@ cc_import = rule(
         "alwayslink": attr.bool(default = False),
         "linkopts": attr.string_list(),
         "includes": attr.string_list(),
+        "deps": attr.label_list(),
+        "data": attr.label_list(allow_files = True),
         "_cc_toolchain": attr.label(default = "@bazel_tools//tools/cpp:current_cc_toolchain"),
     },
-    toolchains = ["@rules_cc//cc:toolchain_type"],  # copybara-use-repo-external-label
+    toolchains = ["@bazel_tools//tools/cpp:toolchain_type"],  # copybara-use-repo-external-label
     fragments = ["cpp"],
+    incompatible_use_toolchain_transition = True,
 )

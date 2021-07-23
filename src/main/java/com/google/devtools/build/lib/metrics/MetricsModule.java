@@ -21,6 +21,7 @@ import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
 import com.google.devtools.common.options.OptionsBase;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * A blaze module that installs metrics instrumentations and issues a {@link BuildMetricsEvent} at
@@ -39,11 +40,25 @@ public class MetricsModule extends BlazeModule {
             "When set we collect and publish used_heap_size_post_build "
                 + "from build_event_stream.proto. This forces a full GC and is off by default.")
     public boolean bepPublishUsedHeapSizePostBuild;
+
+    @Option(
+        name = "experimental_record_metrics_for_all_mnemonics",
+        defaultValue = "false",
+        documentationCategory = OptionDocumentationCategory.LOGGING,
+        effectTags = {OptionEffectTag.UNKNOWN},
+        help =
+            "By default the number of action types is limited to the 20 mnemonics with the largest "
+                + "number of executed actions. Setting this option will write statistics for all "
+                + "mnemonics.")
+    public boolean recordMetricsForAllMnemonics;
   }
+
+  private final AtomicInteger numAnalyses = new AtomicInteger();
+  private final AtomicInteger numBuilds = new AtomicInteger();
 
   @Override
   public Iterable<Class<? extends OptionsBase>> getCommandOptions(Command command) {
-    return "build".equals(command.name()) ? ImmutableList.of(Options.class) : ImmutableList.of();
+    return ImmutableList.of(Options.class);
   }
 
   /**
@@ -57,9 +72,6 @@ public class MetricsModule extends BlazeModule {
 
   @Override
   public void beforeCommand(CommandEnvironment env) {
-    MetricsCollector.installInEnv(env);
+    MetricsCollector.installInEnv(env, numAnalyses, numBuilds);
   }
-
-  @Override
-  public void afterCommand() {}
 }

@@ -22,17 +22,16 @@ import com.google.common.collect.Lists;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
-import com.google.devtools.build.lib.skylarkbuildapi.FilesetEntryApi;
-import com.google.devtools.build.lib.syntax.Printer;
-import com.google.devtools.build.lib.syntax.StarlarkValue;
+import com.google.devtools.build.lib.starlarkbuildapi.FilesetEntryApi;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import javax.annotation.Nullable;
+import net.starlark.java.eval.Printer;
+import net.starlark.java.eval.StarlarkValue;
 
 /**
  * FilesetEntry is a value object used to represent a "FilesetEntry" inside a "Fileset" BUILD rule.
@@ -41,7 +40,7 @@ import javax.annotation.Nullable;
 @ThreadSafe
 public final class FilesetEntry implements StarlarkValue, FilesetEntryApi {
 
-  public static final SymlinkBehavior DEFAULT_SYMLINK_BEHAVIOR = SymlinkBehavior.COPY;
+  private static final SymlinkBehavior DEFAULT_SYMLINK_BEHAVIOR = SymlinkBehavior.COPY;
   public static final String DEFAULT_STRIP_PREFIX = ".";
   public static final String STRIP_PREFIX_WORKSPACE = "%workspace%";
 
@@ -50,35 +49,20 @@ public final class FilesetEntry implements StarlarkValue, FilesetEntryApi {
     return true;
   }
 
-  public static List<String> makeStringList(List<Label> labels) {
-    if (labels == null) {
-      return Collections.emptyList();
-    }
-    List<String> strings = Lists.newArrayListWithCapacity(labels.size());
-    for (Label label : labels) {
-      strings.add(label.toString());
-    }
-    return strings;
-  }
-
-  public static List<?> makeList(Collection<?> list) {
-    return list == null ? Lists.newArrayList() : Lists.newArrayList(list);
-  }
-
   @Override
   public void repr(Printer printer) {
     printer.append("FilesetEntry(srcdir = ");
-    printer.repr(getSrcLabel().toString());
+    printer.repr(srcLabel.toString());
     printer.append(", files = ");
-    printer.repr(makeStringList(getFiles()));
+    printer.repr(files == null ? ImmutableList.of() : Lists.transform(files, Label::toString));
     printer.append(", excludes = ");
-    printer.repr(makeList(getExcludes()));
+    printer.repr(excludes == null ? ImmutableList.of() : excludes.asList());
     printer.append(", destdir = ");
-    printer.repr(getDestDir().getPathString());
+    printer.repr(destDir.getPathString());
     printer.append(", strip_prefix = ");
-    printer.repr(getStripPrefix());
+    printer.repr(stripPrefix);
     printer.append(", symlinks = ");
-    printer.repr(getSymlinkBehavior().toString());
+    printer.repr(symlinkBehavior.toString());
     printer.append(")");
   }
 

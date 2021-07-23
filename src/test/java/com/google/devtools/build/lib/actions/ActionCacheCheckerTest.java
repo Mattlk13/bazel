@@ -21,6 +21,9 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.actions.ActionCacheChecker.Token;
 import com.google.devtools.build.lib.actions.Artifact.ArtifactExpander;
+import com.google.devtools.build.lib.actions.Artifact.SpecialArtifact;
+import com.google.devtools.build.lib.actions.Artifact.SpecialArtifactType;
+import com.google.devtools.build.lib.actions.ArtifactRoot.RootType;
 import com.google.devtools.build.lib.actions.cache.ActionCache;
 import com.google.devtools.build.lib.actions.cache.CompactPersistentActionCache;
 import com.google.devtools.build.lib.actions.cache.MetadataHandler;
@@ -36,14 +39,19 @@ import com.google.devtools.build.lib.clock.Clock;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
+import com.google.devtools.build.lib.events.NullEventHandler;
 import com.google.devtools.build.lib.testutil.ManualClock;
 import com.google.devtools.build.lib.testutil.Scratch;
 import com.google.devtools.build.lib.util.Fingerprint;
+import com.google.devtools.build.lib.vfs.DigestHashFunction;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
+import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -57,7 +65,7 @@ import org.junit.runners.JUnit4;
 
 @RunWith(JUnit4.class)
 public class ActionCacheCheckerTest {
-  private CorruptibleCompactPersistentActionCache cache;
+  private CorruptibleActionCache cache;
   private ActionCacheChecker cacheChecker;
   private Set<Path> filesToDelete;
 
@@ -67,7 +75,7 @@ public class ActionCacheCheckerTest {
     Clock clock = new ManualClock();
     ArtifactResolver artifactResolver = new FakeArtifactResolverBase();
 
-    cache = new CorruptibleCompactPersistentActionCache(scratch.resolve("/cache/test.dat"), clock);
+    cache = new CorruptibleActionCache(scratch.resolve("/cache/test.dat"), clock);
     cacheChecker =
         new ActionCacheChecker(
             cache, artifactResolver, new ActionKeyContext(), Predicates.alwaysTrue(), null);
@@ -118,10 +126,17 @@ public class ActionCacheCheckerTest {
 
     Token token =
         cacheChecker.getTokenIfNeedToExecute(
-            action, null, clientEnv, null, metadataHandler, platform);
+            action,
+            /*resolvedCacheArtifacts=*/ null,
+            clientEnv,
+            /*handler=*/ null,
+            metadataHandler,
+            /*artifactExpander=*/ null,
+            platform);
     if (token != null) {
       // Real action execution would happen here.
-      cacheChecker.updateActionCache(action, token, metadataHandler, clientEnv, platform);
+      cacheChecker.updateActionCache(
+          action, token, metadataHandler, /*artifactExpander=*/ null, clientEnv, platform);
     }
   }
 
@@ -214,12 +229,13 @@ public class ActionCacheCheckerTest {
 
   @Test
   public void testDifferentEnvironment() throws Exception {
-    Action action = new NullAction() {
-      @Override
-      public Iterable<String> getClientEnvironmentVariables() {
-        return ImmutableList.of("used-var");
-      }
-    };
+    Action action =
+        new NullAction() {
+          @Override
+          public ImmutableList<String> getClientEnvironmentVariables() {
+            return ImmutableList.of("used-var");
+          }
+        };
     Map<String, String> clientEnv = new HashMap<>();
     clientEnv.put("unused-var", "1");
     runAction(action, clientEnv);  // Not cached.
@@ -306,22 +322,22 @@ public class ActionCacheCheckerTest {
   }
 
   @Test
-  public void testMiddleman_NotCached() throws Exception {
+  public void testMiddleman_notCached() throws Exception {
     doTestNotCached(new NullMiddlemanAction(), MissReason.DIFFERENT_DEPS);
   }
 
   @Test
-  public void testMiddleman_Cached() throws Exception {
+  public void testMiddleman_cached() throws Exception {
     doTestCached(new NullMiddlemanAction(), MissReason.DIFFERENT_DEPS);
   }
 
   @Test
-  public void testMiddleman_CorruptedCacheEntry() throws Exception {
+  public void testMiddleman_corruptedCacheEntry() throws Exception {
     doTestCorruptedCacheEntry(new NullMiddlemanAction());
   }
 
   @Test
-  public void testMiddleman_DifferentFiles() throws Exception {
+  public void testMiddleman_differentFiles() throws Exception {
     Action action =
         new NullMiddlemanAction() {
           @Override
@@ -348,13 +364,41 @@ public class ActionCacheCheckerTest {
             .build());
   }
 
-  /** A {@link CompactPersistentActionCache} that allows injecting corruption for testing. */
-  private static class CorruptibleCompactPersistentActionCache
-      extends CompactPersistentActionCache {
+  @Test
+  public void testDeletedConstantMetadataOutputCausesReexecution() throws Exception {
+    SpecialArtifact output =
+        new Artifact.SpecialArtifact(
+            ArtifactRoot.asDerivedRoot(
+                new InMemoryFileSystem(DigestHashFunction.SHA256).getPath("/output"),
+                RootType.Output,
+                "bin"),
+            PathFragment.create("bin/dummy"),
+            ActionsTestUtil.NULL_ARTIFACT_OWNER,
+            SpecialArtifactType.CONSTANT_METADATA);
+    output.getPath().getParentDirectory().createDirectoryAndParents();
+    Action action = new NullAction(output);
+    runAction(action);
+    output.getPath().delete();
+    assertThat(
+            cacheChecker.getTokenIfNeedToExecute(
+                action,
+                null,
+                ImmutableMap.of(),
+                null,
+                new FakeMetadataHandler(),
+                null,
+                ImmutableMap.of()))
+        .isNotNull();
+  }
+
+  /** An {@link ActionCache} that allows injecting corruption for testing. */
+  private static class CorruptibleActionCache implements ActionCache {
+    private final CompactPersistentActionCache delegate;
     private boolean corrupted = false;
 
-    CorruptibleCompactPersistentActionCache(Path cacheRoot, Clock clock) throws IOException {
-      super(cacheRoot, clock);
+    CorruptibleActionCache(Path cacheRoot, Clock clock) throws IOException {
+      this.delegate =
+          CompactPersistentActionCache.create(cacheRoot, clock, NullEventHandler.INSTANCE);
     }
 
     void corruptAllEntries() {
@@ -363,11 +407,52 @@ public class ActionCacheCheckerTest {
 
     @Override
     public Entry get(String key) {
-      if (corrupted) {
-        return ActionCache.Entry.CORRUPTED;
-      } else {
-        return super.get(key);
-      }
+      return corrupted ? ActionCache.Entry.CORRUPTED : delegate.get(key);
+    }
+
+    @Override
+    public void put(String key, Entry entry) {
+      delegate.put(key, entry);
+    }
+
+    @Override
+    public void remove(String key) {
+      delegate.remove(key);
+    }
+
+    @Override
+    public long save() throws IOException {
+      return delegate.save();
+    }
+
+    @Override
+    public void clear() {
+      delegate.clear();
+    }
+
+    @Override
+    public void dump(PrintStream out) {
+      delegate.dump(out);
+    }
+
+    @Override
+    public void accountHit() {
+      delegate.accountHit();
+    }
+
+    @Override
+    public void accountMiss(MissReason reason) {
+      delegate.accountMiss(reason);
+    }
+
+    @Override
+    public void mergeIntoActionCacheStatistics(ActionCacheStatistics.Builder builder) {
+      delegate.mergeIntoActionCacheStatistics(builder);
+    }
+
+    @Override
+    public void resetStatistics() {
+      delegate.resetStatistics();
     }
   }
 

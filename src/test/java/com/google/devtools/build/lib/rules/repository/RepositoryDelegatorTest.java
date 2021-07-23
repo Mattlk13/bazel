@@ -17,18 +17,26 @@ package com.google.devtools.build.lib.rules.repository;
 
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.devtools.build.lib.bazel.bzlmod.BzlmodTestUtil.createModuleKey;
 
-import com.google.common.base.Optional;
-import com.google.common.cache.CacheBuilder;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.hash.HashFunction;
 import com.google.devtools.build.lib.actions.FileStateValue;
 import com.google.devtools.build.lib.actions.FileValue;
+import com.google.devtools.build.lib.actions.ThreadStateReceiver;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
 import com.google.devtools.build.lib.analysis.ServerDirectories;
 import com.google.devtools.build.lib.analysis.util.AnalysisMock;
+import com.google.devtools.build.lib.bazel.bzlmod.BzlmodRepoRuleHelperImpl;
+import com.google.devtools.build.lib.bazel.bzlmod.BzlmodRepoRuleValue;
+import com.google.devtools.build.lib.bazel.bzlmod.DiscoveryFunction;
+import com.google.devtools.build.lib.bazel.bzlmod.FakeRegistry;
+import com.google.devtools.build.lib.bazel.bzlmod.ModuleFileFunction;
+import com.google.devtools.build.lib.bazel.bzlmod.SelectionFunction;
 import com.google.devtools.build.lib.bazel.repository.downloader.DownloadManager;
 import com.google.devtools.build.lib.bazel.repository.starlark.StarlarkRepositoryFunction;
 import com.google.devtools.build.lib.bazel.repository.starlark.StarlarkRepositoryModule;
@@ -36,12 +44,16 @@ import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.events.StoredEventHandler;
 import com.google.devtools.build.lib.packages.PackageFactory;
 import com.google.devtools.build.lib.packages.Rule;
+import com.google.devtools.build.lib.packages.RuleFactory.InvalidRuleException;
 import com.google.devtools.build.lib.packages.WorkspaceFileValue;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
 import com.google.devtools.build.lib.rules.repository.RepositoryDirectoryValue.SuccessfulRepositoryDirectoryValue;
-import com.google.devtools.build.lib.skyframe.ASTFileLookupFunction;
+import com.google.devtools.build.lib.rules.repository.RepositoryFunction.AlreadyReportedRepositoryAccessException;
+import com.google.devtools.build.lib.rules.repository.RepositoryFunction.RepositoryFunctionException;
 import com.google.devtools.build.lib.skyframe.BazelSkyframeExecutorConstants;
+import com.google.devtools.build.lib.skyframe.BzlCompileFunction;
 import com.google.devtools.build.lib.skyframe.BzlLoadFunction;
+import com.google.devtools.build.lib.skyframe.BzlmodRepoRuleFunction;
 import com.google.devtools.build.lib.skyframe.ContainingPackageLookupFunction;
 import com.google.devtools.build.lib.skyframe.ExternalFilesHelper;
 import com.google.devtools.build.lib.skyframe.ExternalFilesHelper.ExternalFileAction;
@@ -57,10 +69,8 @@ import com.google.devtools.build.lib.skyframe.PackageLookupFunction.CrossReposit
 import com.google.devtools.build.lib.skyframe.PrecomputedFunction;
 import com.google.devtools.build.lib.skyframe.PrecomputedValue;
 import com.google.devtools.build.lib.skyframe.SkyFunctions;
-import com.google.devtools.build.lib.skyframe.WorkspaceASTFunction;
 import com.google.devtools.build.lib.skyframe.WorkspaceFileFunction;
-import com.google.devtools.build.lib.skylarkbuildapi.repository.RepositoryBootstrap;
-import com.google.devtools.build.lib.syntax.StarlarkSemantics;
+import com.google.devtools.build.lib.starlarkbuildapi.repository.RepositoryBootstrap;
 import com.google.devtools.build.lib.testutil.FoundationTestCase;
 import com.google.devtools.build.lib.testutil.ManualClock;
 import com.google.devtools.build.lib.testutil.TestConstants;
@@ -69,7 +79,6 @@ import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
-import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.lib.vfs.UnixGlob;
 import com.google.devtools.build.skyframe.EvaluationContext;
 import com.google.devtools.build.skyframe.EvaluationResult;
@@ -86,18 +95,18 @@ import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 import java.io.IOException;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.annotation.Nullable;
+import net.starlark.java.eval.StarlarkSemantics;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import org.mockito.Mockito;
 
-/**
- * Tests for {@link RepositoryDelegatorFunction}
- */
+/** Tests for {@link RepositoryDelegatorFunction} */
 @RunWith(JUnit4.class)
 public class RepositoryDelegatorTest extends FoundationTestCase {
   private RepositoryDelegatorFunction delegatorFunction;
@@ -107,10 +116,13 @@ public class RepositoryDelegatorTest extends FoundationTestCase {
   private RecordingDifferencer differencer;
   private TestStarlarkRepositoryFunction testStarlarkRepositoryFunction;
   private Path rootPath;
+  private FakeRegistry.Factory registryFactory;
 
   @Before
   public void setupDelegator() throws Exception {
     rootPath = scratch.dir("/outputbase");
+    scratch.file(
+        rootPath.getRelative("MODULE.bazel").getPathString(), "module(name='test',version='0.1')");
     BlazeDirectories directories =
         new BlazeDirectories(
             new ServerDirectories(rootPath, rootPath, rootPath),
@@ -128,8 +140,8 @@ public class RepositoryDelegatorTest extends FoundationTestCase {
         new RepositoryDelegatorFunction(
             repositoryHandlers,
             testStarlarkRepositoryFunction,
-            new AtomicBoolean(true),
-            ImmutableMap::of,
+            /* isFetch= */ new AtomicBoolean(true),
+            /* clientEnvironmentSupplier= */ ImmutableMap::of,
             directories,
             managedDirectoriesKnowledge,
             BazelSkyframeExecutorConstants.EXTERNAL_PACKAGE_HELPER);
@@ -139,10 +151,11 @@ public class RepositoryDelegatorTest extends FoundationTestCase {
                 rootPath,
                 ImmutableList.of(Root.fromPath(rootPath)),
                 BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY));
-    ExternalFilesHelper externalFilesHelper = ExternalFilesHelper.createForTesting(
-        pkgLocator,
-        ExternalFileAction.DEPEND_ON_EXTERNAL_PKG_FOR_EXTERNAL_REPO_PATHS,
-        directories);
+    ExternalFilesHelper externalFilesHelper =
+        ExternalFilesHelper.createForTesting(
+            pkgLocator,
+            ExternalFileAction.DEPEND_ON_EXTERNAL_PKG_FOR_EXTERNAL_REPO_PATHS,
+            directories);
     differencer = new SequencedRecordingDifferencer();
 
     ConfiguredRuleClassProvider.Builder builder = new ConfiguredRuleClassProvider.Builder();
@@ -157,6 +170,9 @@ public class RepositoryDelegatorTest extends FoundationTestCase {
             .getPackageFactoryBuilderForTesting(directories)
             .build(ruleClassProvider, fileSystem);
 
+    registryFactory = new FakeRegistry.Factory();
+
+    HashFunction hashFunction = fileSystem.getDigestFunction().getHashFunction();
     MemoizingEvaluator evaluator =
         new InMemoryMemoizingEvaluator(
             ImmutableMap.<SkyFunctionName, SkyFunction>builder()
@@ -170,7 +186,19 @@ public class RepositoryDelegatorTest extends FoundationTestCase {
                 .put(SkyFunctions.REPOSITORY_DIRECTORY, delegatorFunction)
                 .put(
                     SkyFunctions.PACKAGE,
-                    new PackageFunction(null, null, null, null, null, null, null, null))
+                    new PackageFunction(
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        /*packageProgress=*/ null,
+                        PackageFunction.ActionOnIOExceptionReadingBuildFile.UseOriginalIOException
+                            .INSTANCE,
+                        PackageFunction.IncrementalityIntent.INCREMENTAL,
+                        k -> ThreadStateReceiver.NULL_INSTANCE))
                 .put(
                     SkyFunctions.PACKAGE_LOOKUP,
                     new PackageLookupFunction(
@@ -178,7 +206,6 @@ public class RepositoryDelegatorTest extends FoundationTestCase {
                         CrossRepositoryLabelViolationStrategy.ERROR,
                         BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY,
                         BazelSkyframeExecutorConstants.EXTERNAL_PACKAGE_HELPER))
-                .put(SkyFunctions.WORKSPACE_AST, new WorkspaceASTFunction(ruleClassProvider))
                 .put(
                     WorkspaceFileValue.WORKSPACE_FILE,
                     new WorkspaceFileFunction(
@@ -186,7 +213,6 @@ public class RepositoryDelegatorTest extends FoundationTestCase {
                         pkgFactory,
                         directories,
                         /*bzlLoadFunctionForInlining=*/ null))
-                .put(SkyFunctions.REPOSITORY, new RepositoryLoaderFunction())
                 .put(
                     SkyFunctions.LOCAL_REPOSITORY_LOOKUP,
                     new LocalRepositoryLookupFunction(
@@ -196,22 +222,24 @@ public class RepositoryDelegatorTest extends FoundationTestCase {
                     new ExternalPackageFunction(
                         BazelSkyframeExecutorConstants.EXTERNAL_PACKAGE_HELPER))
                 .put(SkyFunctions.PRECOMPUTED, new PrecomputedFunction())
-                .put(
-                    SkyFunctions.AST_FILE_LOOKUP,
-                    new ASTFileLookupFunction(ruleClassProvider, fileSystem.getDigestFunction()))
+                .put(SkyFunctions.BZL_COMPILE, new BzlCompileFunction(pkgFactory, hashFunction))
                 .put(
                     SkyFunctions.BZL_LOAD,
                     BzlLoadFunction.create(
-                        ruleClassProvider,
-                        pkgFactory,
-                        fileSystem.getDigestFunction(),
-                        CacheBuilder.newBuilder().build()))
+                        pkgFactory, directories, hashFunction, Caffeine.newBuilder().build()))
                 .put(SkyFunctions.CONTAINING_PACKAGE_LOOKUP, new ContainingPackageLookupFunction())
                 .put(
                     SkyFunctions.IGNORED_PACKAGE_PREFIXES,
                     new IgnoredPackagePrefixesFunction(
                         /*ignoredPackagePrefixesFile=*/ PathFragment.EMPTY_FRAGMENT))
                 .put(SkyFunctions.RESOLVED_HASH_VALUES, new ResolvedHashesFunction())
+                .put(SkyFunctions.MODULE_FILE, new ModuleFileFunction(registryFactory, rootPath))
+                .put(SkyFunctions.DISCOVERY, new DiscoveryFunction())
+                .put(SkyFunctions.SELECTION, new SelectionFunction())
+                .put(
+                    BzlmodRepoRuleValue.BZLMOD_REPO_RULE,
+                    new BzlmodRepoRuleFunction(
+                        pkgFactory, ruleClassProvider, directories, new BzlmodRepoRuleHelperImpl()))
                 .build(),
             differencer);
     driver = new SequentialBuildDriver(evaluator);
@@ -223,11 +251,12 @@ public class RepositoryDelegatorTest extends FoundationTestCase {
     PrecomputedValue.PATH_PACKAGE_LOCATOR.set(differencer, pkgLocator.get());
     PrecomputedValue.STARLARK_SEMANTICS.set(differencer, StarlarkSemantics.DEFAULT);
     RepositoryDelegatorFunction.RESOLVED_FILE_INSTEAD_OF_WORKSPACE.set(
-        differencer, Optional.<RootedPath>absent());
+        differencer, Optional.empty());
     PrecomputedValue.REPO_ENV.set(differencer, ImmutableMap.of());
     RepositoryDelegatorFunction.OUTPUT_VERIFICATION_REPOSITORY_RULES.set(
         differencer, ImmutableSet.of());
-    RepositoryDelegatorFunction.RESOLVED_FILE_FOR_VERIFICATION.set(differencer, Optional.absent());
+    RepositoryDelegatorFunction.RESOLVED_FILE_FOR_VERIFICATION.set(differencer, Optional.empty());
+    RepositoryDelegatorFunction.ENABLE_BZLMOD.set(differencer, true);
   }
 
   @Test
@@ -243,7 +272,7 @@ public class RepositoryDelegatorTest extends FoundationTestCase {
         EvaluationContext.newBuilder()
             .setKeepGoing(false)
             .setNumThreads(8)
-            .setEventHander(eventHandler)
+            .setEventHandler(eventHandler)
             .build();
     EvaluationResult<SkyValue> result = driver.evaluate(ImmutableList.of(key), evaluationContext);
     assertThat(result.hasError()).isFalse();
@@ -325,12 +354,6 @@ public class RepositoryDelegatorTest extends FoundationTestCase {
     managedDirectoriesKnowledge.setManagedDirectories(
         ImmutableMap.of(PathFragment.create("dir1"), RepositoryName.create("@repo1")));
 
-    StarlarkSemantics semantics =
-        StarlarkSemantics.builderWithDefaults()
-            .experimentalAllowIncrementalRepositoryUpdates(true)
-            .build();
-    PrecomputedValue.STARLARK_SEMANTICS.set(differencer, semantics);
-
     loadRepo("repo1");
 
     assertThat(testStarlarkRepositoryFunction.isFetchCalled()).isTrue();
@@ -372,6 +395,96 @@ public class RepositoryDelegatorTest extends FoundationTestCase {
     testStarlarkRepositoryFunction.reset();
   }
 
+  @Test
+  public void testFetchRepositoryException_eventHandled() throws Exception {
+    scratch.file(
+        rootPath.getRelative("rule.bzl").getPathString(),
+        "def _impl(ctx):",
+        "    pass",
+        "sample = rule(",
+        "    implementation = _impl,",
+        "    toolchains = ['//:toolchain_type'],",
+        ")");
+    scratch.file(
+        rootPath.getRelative("BUILD").getPathString(),
+        "load('rule.bzl', 'sample')",
+        "toolchain_type(name = 'toolchain_type')",
+        "sample(name = 'sample')");
+    scratch.file(
+        rootPath.getRelative("repo_rule.bzl").getPathString(),
+        "def _impl(repo_ctx):",
+        "# Error: no file written",
+        "    pass",
+        "broken_repo = repository_rule(implementation = _impl)");
+    scratch.overwriteFile(
+        rootPath.getRelative("WORKSPACE").getPathString(),
+        "load('repo_rule.bzl', 'broken_repo')",
+        "broken_repo(name = 'broken')");
+
+    StoredEventHandler eventHandler = new StoredEventHandler();
+    SkyKey key = RepositoryDirectoryValue.key(RepositoryName.createFromValidStrippedName("broken"));
+    // Make it be evaluated every time, as we are testing evaluation.
+    differencer.invalidate(ImmutableSet.of(key));
+    EvaluationContext evaluationContext =
+        EvaluationContext.newBuilder()
+            .setKeepGoing(false)
+            .setNumThreads(8)
+            .setEventHandler(eventHandler)
+            .build();
+    EvaluationResult<SkyValue> result = driver.evaluate(ImmutableList.of(key), evaluationContext);
+
+    assertThat(result.hasError()).isTrue();
+    assertThat(result.getError().getException())
+        .isInstanceOf(AlreadyReportedRepositoryAccessException.class);
+    assertThat(eventHandler.hasErrors()).isTrue();
+    assertThat(eventHandler.getEvents()).hasSize(1);
+  }
+
+  @Test
+  public void loadRepositoryFromBzlmod() throws Exception {
+    scratch.overwriteFile(
+        rootPath.getRelative("MODULE.bazel").getPathString(),
+        "module(name='A',version='0.1')",
+        "bazel_dep(name='B',version='1.0')");
+    FakeRegistry registry =
+        registryFactory
+            .newFakeRegistry()
+            .addModule(createModuleKey("B", "1.0"), "module(name='B', version='1.0');");
+    ModuleFileFunction.REGISTRIES.set(differencer, ImmutableList.of(registry.getUrl()));
+    scratch.file(rootPath.getRelative("BUILD").getPathString());
+    scratch.file(
+        rootPath.getRelative("repo_rule.bzl").getPathString(),
+        "def _impl(rctx):",
+        " rctx.file('BUILD', '')",
+        "fictive_repo_rule = repository_rule(implementation = _impl)");
+    scratch.file(
+        rootPath.getRelative("WORKSPACE").getPathString(),
+        "load(':repo_rule.bzl', 'fictive_repo_rule')",
+        "fictive_repo_rule(name = 'B.1.0')",
+        "fictive_repo_rule(name = 'C')");
+
+    StoredEventHandler eventHandler = new StoredEventHandler();
+    SkyKey key = RepositoryDirectoryValue.key(RepositoryName.createFromValidStrippedName("B.1.0"));
+    EvaluationContext evaluationContext =
+        EvaluationContext.newBuilder()
+            .setKeepGoing(false)
+            .setNumThreads(8)
+            .setEventHandler(eventHandler)
+            .build();
+    EvaluationResult<SkyValue> result = driver.evaluate(ImmutableList.of(key), evaluationContext);
+
+    // B.1.0 should be fetched from MODULE.bazel file instead of WORKSPACE file.
+    // Because FakeRegistry returns a fake_http_archive_rule, the fetch should fail as expected.
+    assertThat(result.hasError()).isTrue();
+    assertThat(result.getError().getException()).isInstanceOf(InvalidRuleException.class);
+    assertThat(result.getError().getException())
+        .hasMessageThat()
+        .isEqualTo("Unrecognized native repository rule: fake_http_archive_rule");
+
+    // C should still be fetched from WORKSPACE successfully.
+    loadRepo("C");
+  }
+
   private void loadRepo(String strippedRepoName) throws InterruptedException {
     StoredEventHandler eventHandler = new StoredEventHandler();
     SkyKey key =
@@ -382,7 +495,7 @@ public class RepositoryDelegatorTest extends FoundationTestCase {
         EvaluationContext.newBuilder()
             .setKeepGoing(false)
             .setNumThreads(8)
-            .setEventHander(eventHandler)
+            .setEventHandler(eventHandler)
             .build();
     EvaluationResult<SkyValue> result = driver.evaluate(ImmutableList.of(key), evaluationContext);
     assertThat(result.hasError()).isFalse();

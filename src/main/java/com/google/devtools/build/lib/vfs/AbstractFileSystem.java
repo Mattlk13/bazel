@@ -19,7 +19,6 @@ import static java.nio.file.StandardOpenOption.READ;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.profiler.ProfilerTask;
-import com.google.devtools.build.lib.vfs.DigestHashFunction.DefaultHashFunctionNotSetException;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
@@ -38,14 +37,12 @@ public abstract class AbstractFileSystem extends FileSystem {
   protected static final String ERR_PERMISSION_DENIED = " (Permission denied)";
   protected static final Profiler profiler = Profiler.instance();
 
-  public AbstractFileSystem() throws DefaultHashFunctionNotSetException {}
-
   public AbstractFileSystem(DigestHashFunction digestFunction) {
     super(digestFunction);
   }
 
   @Override
-  protected InputStream getInputStream(Path path) throws IOException {
+  protected InputStream getInputStream(PathFragment path) throws IOException {
     // This loop is a workaround for an apparent bug in FileInputStream.open, which delegates
     // ultimately to JVM_Open in the Hotspot JVM.  This call is not EINTR-safe, so we must do the
     // retry here.
@@ -62,13 +59,13 @@ public abstract class AbstractFileSystem extends FileSystem {
     }
   }
 
-  /** Allows the mapping of Path to InputStream to be overridden in subclasses. */
-  protected InputStream createFileInputStream(Path path) throws IOException {
+  /** Allows the mapping of PathFragment to InputStream to be overridden in subclasses. */
+  protected InputStream createFileInputStream(PathFragment path) throws IOException {
     return new FileInputStream(path.toString());
   }
 
   /** Returns either normal or profiled FileInputStream. */
-  private InputStream createMaybeProfiledInputStream(Path path) throws IOException {
+  private InputStream createMaybeProfiledInputStream(PathFragment path) throws IOException {
     final String name = path.toString();
     if (profiler.isActive()
         && (profiler.isProfiling(ProfilerTask.VFS_READ)
@@ -87,7 +84,7 @@ public abstract class AbstractFileSystem extends FileSystem {
   }
 
   @Override
-  protected ReadableByteChannel createReadableByteChannel(Path path) throws IOException {
+  protected ReadableByteChannel createReadableByteChannel(PathFragment path) throws IOException {
     final String name = path.toString();
     if (profiler.isActive()
         && (profiler.isProfiling(ProfilerTask.VFS_READ)
@@ -104,14 +101,30 @@ public abstract class AbstractFileSystem extends FileSystem {
     }
   }
 
+  @Override
+  protected boolean createWritableDirectory(PathFragment path) throws IOException {
+    FileStatus stat = statNullable(path, /*followSymlinks=*/ false);
+    if (stat == null) {
+      return createDirectory(path);
+    }
+
+    if (!stat.isDirectory()) {
+      throw new IOException(path + " (Not a directory)");
+    }
+
+    chmod(path, 0777);
+    return false;
+  }
+
   /**
    * Returns either normal or profiled FileOutputStream. Should be used by subclasses to create
    * default OutputStream instance.
    */
-  protected OutputStream createFileOutputStream(Path path, boolean append)
+  protected OutputStream createFileOutputStream(PathFragment path, boolean append, boolean internal)
       throws FileNotFoundException {
     final String name = path.toString();
-    if (profiler.isActive()
+    if (!internal
+        && profiler.isActive()
         && (profiler.isProfiling(ProfilerTask.VFS_WRITE)
             || profiler.isProfiling(ProfilerTask.VFS_OPEN))) {
       long startTime = Profiler.nanoTimeMaybe();
@@ -126,9 +139,10 @@ public abstract class AbstractFileSystem extends FileSystem {
   }
 
   @Override
-  protected OutputStream getOutputStream(Path path, boolean append) throws IOException {
+  protected OutputStream getOutputStream(PathFragment path, boolean append, boolean internal)
+      throws IOException {
     try {
-      return createFileOutputStream(path, append);
+      return createFileOutputStream(path, append, internal);
     } catch (FileNotFoundException e) {
       // Why does it throw a *FileNotFoundException* if it can't write?
       // That does not make any sense! And its in a completely different
@@ -138,6 +152,11 @@ public abstract class AbstractFileSystem extends FileSystem {
       }
       throw e;
     }
+  }
+
+  @Override
+  protected OutputStream getOutputStream(PathFragment path, boolean append) throws IOException {
+    return getOutputStream(path, append, /* internal= */ false);
   }
 
   private static final class ProfiledInputStream extends FilterInputStream {

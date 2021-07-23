@@ -23,14 +23,12 @@ import com.google.devtools.build.lib.analysis.config.ConfigMatchingProvider;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.packages.BuildType.Selector;
 import com.google.devtools.build.lib.packages.BuildType.SelectorList;
-import com.google.devtools.build.lib.syntax.EvalException;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import javax.annotation.Nullable;
 
 /**
@@ -53,14 +51,13 @@ import javax.annotation.Nullable;
 public class ConfiguredAttributeMapper extends AbstractAttributeMapper {
 
   private final Map<Label, ConfigMatchingProvider> configConditions;
-  private Rule rule;
+  private final String configHash;
 
-  private ConfiguredAttributeMapper(Rule rule,
-      ImmutableMap<Label, ConfigMatchingProvider> configConditions) {
-    super(Preconditions.checkNotNull(rule).getPackage(), rule.getRuleClassObject(), rule.getLabel(),
-        rule.getAttributeContainer());
+  private ConfiguredAttributeMapper(
+      Rule rule, ImmutableMap<Label, ConfigMatchingProvider> configConditions, String configHash) {
+    super(Preconditions.checkNotNull(rule));
     this.configConditions = configConditions;
-    this.rule = rule;
+    this.configHash = configHash;
   }
 
   /**
@@ -71,20 +68,27 @@ public class ConfiguredAttributeMapper extends AbstractAttributeMapper {
    * constructors.
    */
   public static ConfiguredAttributeMapper of(
-      Rule rule, ImmutableMap<Label, ConfigMatchingProvider> configConditions) {
-    return new ConfiguredAttributeMapper(rule, configConditions);
+      Rule rule, ImmutableMap<Label, ConfigMatchingProvider> configConditions, String configHash) {
+    return new ConfiguredAttributeMapper(rule, configConditions, configHash);
   }
 
   /**
-   * Checks that all attributes can be mapped to their configured values. This is
-   * useful for checking that the configuration space in a configured attribute doesn't
-   * contain unresolvable contradictions.
+   * Checks that all attributes can be mapped to their configured values. This is useful for
+   * checking that the configuration space in a configured attribute doesn't contain unresolvable
+   * contradictions.
    *
-   * @throws EvalException if any attribute's value can't be resolved under this mapper
+   * @throws ValidationException if any attribute's value can't be resolved under this mapper
    */
-  public void validateAttributes() throws EvalException {
+  public void validateAttributes() throws ValidationException {
     for (String attrName : getAttributeNames()) {
       getAndValidate(attrName, getAttributeType(attrName));
+    }
+  }
+
+  /** ValidationException indicates an error during attribute validation. */
+  public static final class ValidationException extends Exception {
+    private ValidationException(String message) {
+      super(message);
     }
   }
 
@@ -92,8 +96,7 @@ public class ConfiguredAttributeMapper extends AbstractAttributeMapper {
    * Variation of {@link #get} that throws an informative exception if the attribute can't be
    * resolved due to intrinsic contradictions in the configuration.
    */
-  @SuppressWarnings("unchecked")
-  private <T> T getAndValidate(String attributeName, Type<T> type) throws EvalException {
+  private <T> T getAndValidate(String attributeName, Type<T> type) throws ValidationException {
     SelectorList<T> selectorList = getSelectorList(attributeName, type);
     if (selectorList == null) {
       // This is a normal attribute.
@@ -110,15 +113,16 @@ public class ConfiguredAttributeMapper extends AbstractAttributeMapper {
         // do that anyway, so that isn't a loss.
         Attribute attr = getAttributeDefinition(attributeName);
         if (attr.isMandatory()) {
-          throw new EvalException(
-              rule.getLocation(),
+          throw new ValidationException(
               String.format(
                   "Mandatory attribute '%s' resolved to 'None' after evaluating 'select'"
                       + " expression",
                   attributeName));
         }
         Verify.verify(attr.getCondition() == Predicates.<AttributeMap>alwaysTrue());
-        resolvedList.add((T) attr.getDefaultValue(null)); // unchecked cast
+        @SuppressWarnings("unchecked")
+        T defaultValue = (T) attr.getDefaultValue(null);
+        resolvedList.add(defaultValue);
       } else {
         resolvedList.add(resolvedPath.value);
       }
@@ -140,9 +144,12 @@ public class ConfiguredAttributeMapper extends AbstractAttributeMapper {
   }
 
   private <T> ConfigKeyAndValue<T> resolveSelector(String attributeName, Selector<T> selector)
-      throws EvalException {
+      throws ValidationException {
     Map<Label, ConfigKeyAndValue<T>> matchingConditions = new LinkedHashMap<>();
-    Set<Label> conditionLabels = new LinkedHashSet<>();
+    // Use a LinkedHashSet to guarantee deterministic error message ordering. We use a LinkedHashSet
+    // vs. a more general SortedSet because the latter supports insertion-order, which should more
+    // closely match how users see select() structures in BUILD files.
+    LinkedHashSet<Label> conditionLabels = new LinkedHashSet<>();
     ConfigKeyAndValue<T> matchingResult = null;
 
     // Find the matching condition and record its value (checking for duplicates).
@@ -152,8 +159,8 @@ public class ConfiguredAttributeMapper extends AbstractAttributeMapper {
         continue;
       }
 
-      ConfigMatchingProvider curCondition = configConditions.get(
-          rule.getLabel().resolveRepositoryRelative(selectorKey));
+      ConfigMatchingProvider curCondition =
+          configConditions.get(getLabel().resolveRepositoryRelative(selectorKey));
       if (curCondition == null) {
         // This can happen if the rule is in error
         continue;
@@ -185,8 +192,7 @@ public class ConfiguredAttributeMapper extends AbstractAttributeMapper {
     }
 
     if (matchingConditions.size() > 1) {
-      throw new EvalException(
-          rule.getLocation(),
+      throw new ValidationException(
           "Illegal ambiguous match on configurable attribute \""
               + attributeName
               + "\" in "
@@ -201,15 +207,13 @@ public class ConfiguredAttributeMapper extends AbstractAttributeMapper {
     // If nothing matched, choose the default condition.
     if (matchingResult == null) {
       if (!selector.hasDefault()) {
-        String noMatchMessage =
-            "Configurable attribute \"" + attributeName + "\" doesn't match this configuration";
-        if (!selector.getNoMatchError().isEmpty()) {
-          noMatchMessage += ": " + selector.getNoMatchError();
-        } else {
-          noMatchMessage += " (would a default condition help?).\nConditions checked:\n "
-              + Joiner.on("\n ").join(conditionLabels);
-        }
-        throw new EvalException(rule.getLocation(), noMatchMessage);
+        throw new ValidationException(
+            noMatchError(
+                attributeName,
+                selector.getNoMatchError(),
+                conditionLabels,
+                getLabel(),
+                configHash));
       }
       matchingResult =
           selector.hasDefault()
@@ -221,11 +225,50 @@ public class ConfiguredAttributeMapper extends AbstractAttributeMapper {
     return matchingResult;
   }
 
+  /**
+   * Constructs a <a href="https://bazel.build/designs/2016/05/23/beautiful-error-messages.html">
+   * beautiful error</a> for when no conditions in a configurable attribute match.
+   */
+  private static String noMatchError(
+      String attribute,
+      String customNoMatchError,
+      LinkedHashSet<Label> conditionLabels,
+      Label targetLabel,
+      String configHash) {
+    String error =
+        String.format(
+            "configurable attribute \"%s\" in %s doesn't match this configuration",
+            attribute, targetLabel);
+    if (!customNoMatchError.isEmpty()) {
+      error += String.format(": %s\n", customNoMatchError);
+    } else {
+      error +=
+          ". Would a default condition help?\n\n"
+              + "Conditions checked:\n "
+              + Joiner.on("\n ").join(conditionLabels)
+              + "\n\n"
+              + "To see a condition's definition, run: bazel query --output=build "
+              + "<condition label>.\n";
+    }
+    // See ConfiguredTargetQueryEnvironment#shortID for the substring rationale.
+    String configShortHash = configHash.substring(0, 7);
+    error +=
+        String.format(
+            "\nThis instance of %s has configuration identifier %s. "
+                + "To inspect its configuration, run: bazel config %s.\n",
+            targetLabel, configShortHash, configShortHash);
+    error +=
+        "\n"
+            + "For more help, see"
+            + " https://docs.bazel.build/configurable-attributes.html#why-doesnt-my-select-choose-what-i-expect.\n\n";
+    return error;
+  }
+
   @Override
   public <T> T get(String attributeName, Type<T> type) {
     try {
       return getAndValidate(attributeName, type);
-    } catch (EvalException e) {
+    } catch (ValidationException e) {
       // Callers that reach this branch should explicitly validate the attribute through an
       // appropriate call and handle the exception directly. This method assumes
       // pre-validated attributes.
@@ -247,7 +290,7 @@ public class ConfiguredAttributeMapper extends AbstractAttributeMapper {
         if (selector.isValueSet(resolvedPath.configKey)) {
           return true;
         }
-      } catch (EvalException e) {
+      } catch (ValidationException unused) {
         // This will trigger an error via any other call, so the actual return doesn't matter much.
         return true;
       }

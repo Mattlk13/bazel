@@ -31,10 +31,6 @@ public final class SkyFunctions {
       SkyFunctionName.createHermetic("ACTION_ENVIRONMENT_VARIABLE");
   public static final SkyFunctionName DIRECTORY_LISTING_STATE =
       SkyFunctionName.createNonHermetic("DIRECTORY_LISTING_STATE");
-  public static final SkyFunctionName FILE_SYMLINK_CYCLE_UNIQUENESS =
-      SkyFunctionName.createHermetic("FILE_SYMLINK_CYCLE_UNIQUENESS");
-  public static final SkyFunctionName FILE_SYMLINK_INFINITE_EXPANSION_UNIQUENESS =
-      SkyFunctionName.createHermetic("FILE_SYMLINK_INFINITE_EXPANSION_UNIQUENESS");
   public static final SkyFunctionName DIRECTORY_LISTING =
       SkyFunctionName.createHermetic("DIRECTORY_LISTING");
   // Hermetic even though package lookups secretly access the set of deleted packages, because
@@ -43,8 +39,7 @@ public final class SkyFunctions {
       SkyFunctionName.createHermetic("PACKAGE_LOOKUP");
   public static final SkyFunctionName CONTAINING_PACKAGE_LOOKUP =
       SkyFunctionName.createHermetic("CONTAINING_PACKAGE_LOOKUP");
-  public static final SkyFunctionName AST_FILE_LOOKUP =
-      SkyFunctionName.createHermetic("AST_FILE_LOOKUP");
+  public static final SkyFunctionName BZL_COMPILE = SkyFunctionName.createHermetic("BZL_COMPILE");
   public static final SkyFunctionName STARLARK_BUILTINS =
       SkyFunctionName.createHermetic("STARLARK_BUILTINS");
   public static final SkyFunctionName BZL_LOAD = SkyFunctionName.createHermetic("BZL_LOAD");
@@ -84,8 +79,6 @@ public final class SkyFunctions {
   static final SkyFunctionName PREPARE_ANALYSIS_PHASE =
       SkyFunctionName.createNonHermetic("PREPARE_ANALYSIS_PHASE");
   static final SkyFunctionName RECURSIVE_PKG = SkyFunctionName.createHermetic("RECURSIVE_PKG");
-  static final SkyFunctionName TRANSITIVE_TARGET =
-      SkyFunctionName.createHermetic("TRANSITIVE_TARGET");
   public static final SkyFunctionName CONFIGURED_TARGET =
       SkyFunctionName.createHermetic("CONFIGURED_TARGET");
   static final SkyFunctionName ACTION_LOOKUP_CONFLICT_FINDING =
@@ -128,7 +121,6 @@ public final class SkyFunctions {
   public static final SkyFunctionName PLATFORM_MAPPING =
       SkyFunctionName.createHermetic("PLATFORM_MAPPING");
   static final SkyFunctionName COVERAGE_REPORT = SkyFunctionName.createHermetic("COVERAGE_REPORT");
-  public static final SkyFunctionName REPOSITORY = SkyFunctionName.createHermetic("REPOSITORY");
   public static final SkyFunctionName REPOSITORY_DIRECTORY =
       SkyFunctionName.createNonHermetic("REPOSITORY_DIRECTORY");
   public static final SkyFunctionName WORKSPACE_AST =
@@ -155,6 +147,10 @@ public final class SkyFunctions {
       SkyFunctionName.createHermetic("RESOLVED_HASH_VALUES");
   public static final SkyFunctionName LOCAL_CONFIG_PLATFORM =
       SkyFunctionName.createHermetic("LOCAL_CONFIG_PLATFORM");
+  public static final SkyFunctionName MODULE_FILE =
+      SkyFunctionName.createNonHermetic("MODULE_FILE");
+  public static final SkyFunctionName DISCOVERY = SkyFunctionName.createHermetic("DISCOVERY");
+  public static final SkyFunctionName SELECTION = SkyFunctionName.createHermetic("SELECTION");
 
   public static Predicate<SkyKey> isSkyFunction(final SkyFunctionName functionName) {
     return new Predicate<SkyKey>() {

@@ -67,7 +67,7 @@ public class ConstraintsTest extends AbstractConstraintsTest {
     public Metadata getMetadata() {
       return RuleDefinition.Metadata.builder()
           .name("rule_class_default")
-          .ancestors(BaseRuleClasses.RuleBase.class)
+          .ancestors(BaseRuleClasses.NativeActionCreatingRule.class)
           .factoryClass(UnknownRuleConfiguredTarget.class)
           .build();
     }
@@ -600,6 +600,24 @@ public class ConstraintsTest extends AbstractConstraintsTest {
     assertNoEvents();
   }
 
+  @Test
+  public void constraintEnforcementDisabledExecConfig() throws Exception {
+    useConfiguration("--enforce_constraints=0");
+    new EnvironmentGroupMaker("buildenv/foo").setEnvironments("a", "b", "c").setDefaults().make();
+    scratch.file(
+        "hello/BUILD",
+        "genrule(",
+        "    name = 'gen',",
+        "    srcs = [],",
+        "    outs = ['gen.out'],",
+        "    cmd = '',",
+        "    exec_tools = [':main'])",
+        getDependencyRule(),
+        getDependingRule(compatibleWith("//buildenv/foo:a")));
+    assertThat(getConfiguredTarget("//hello:gen")).isNotNull();
+    assertNoEvents();
+  }
+
   /**
    * Tests that package defaults compatibility produces a valid dependency that would otherwise
    * be invalid.
@@ -706,6 +724,33 @@ public class ConstraintsTest extends AbstractConstraintsTest {
   }
 
   @Test
+  public void hostDependenciesAreNotChecked_customRule() throws Exception {
+    new EnvironmentGroupMaker("buildenv/foo").setEnvironments("a", "b").setDefaults("a").make();
+    scratch.file(
+        "hello/rule.bzl",
+        "def _impl(ctx):",
+        "    pass",
+        "my_rule = rule(",
+        "    implementation = _impl,",
+        "    attrs = {",
+        "        'tool': attr.label(cfg = 'host',),",
+        "    },",
+        ")");
+    scratch.file(
+        "hello/BUILD",
+        "load(':rule.bzl', 'my_rule')",
+        "sh_binary(name = 'host_tool',",
+        "    srcs = ['host_tool.sh'],",
+        "    restricted_to = ['//buildenv/foo:b'])",
+        "my_rule(",
+        "    name = 'hello',",
+        "    tool = ':host_tool',",
+        "    compatible_with = ['//buildenv/foo:a'])");
+    assertThat(getConfiguredTarget("//hello:hello")).isNotNull();
+    assertNoEvents();
+  }
+
+  @Test
   public void hostDependenciesNotCheckedNoDistinctHostConfiguration() throws Exception {
     useConfiguration("--nodistinct_host_configuration");
     new EnvironmentGroupMaker("buildenv/foo").setEnvironments("a", "b").setDefaults("a").make();
@@ -719,6 +764,52 @@ public class ConstraintsTest extends AbstractConstraintsTest {
         "    outs = ['hello.out'],",
         "    cmd = '',",
         "    tools = [':host_tool'],",
+        "    compatible_with = ['//buildenv/foo:a'])");
+    assertThat(getConfiguredTarget("//hello:hello")).isNotNull();
+    assertNoEvents();
+  }
+
+  @Test
+  public void execDependenciesAreNotChecked() throws Exception {
+    new EnvironmentGroupMaker("buildenv/foo").setEnvironments("a", "b").setDefaults("a").make();
+    scratch.file(
+        "hello/BUILD",
+        "sh_binary(name = 'host_tool',",
+        "    srcs = ['host_tool.sh'],",
+        "    restricted_to = ['//buildenv/foo:b'])",
+        "genrule(",
+        "    name = 'hello',",
+        "    srcs = [],",
+        "    outs = ['hello.out'],",
+        "    cmd = '',",
+        "    exec_tools = [':host_tool'],",
+        "    compatible_with = ['//buildenv/foo:a'])");
+    assertThat(getConfiguredTarget("//hello:hello")).isNotNull();
+    assertNoEvents();
+  }
+
+  @Test
+  public void execDependenciesAreNotChecked_customRule() throws Exception {
+    new EnvironmentGroupMaker("buildenv/foo").setEnvironments("a", "b").setDefaults("a").make();
+    scratch.file(
+        "hello/rule.bzl",
+        "def _impl(ctx):",
+        "    pass",
+        "my_rule = rule(",
+        "    implementation = _impl,",
+        "    attrs = {",
+        "        'tool': attr.label(cfg = 'exec',),",
+        "    },",
+        ")");
+    scratch.file(
+        "hello/BUILD",
+        "load(':rule.bzl', 'my_rule')",
+        "sh_binary(name = 'exec_tool',",
+        "    srcs = ['exec_tool.sh'],",
+        "    restricted_to = ['//buildenv/foo:b'])",
+        "my_rule(",
+        "    name = 'hello',",
+        "    tool = ':exec_tool',",
         "    compatible_with = ['//buildenv/foo:a'])");
     assertThat(getConfiguredTarget("//hello:hello")).isNotNull();
     assertNoEvents();
@@ -1086,7 +1177,7 @@ public class ConstraintsTest extends AbstractConstraintsTest {
             + " \n"
             + "  environment: //buildenv/foo:b\n"
             + "    removed by: //hello:lib (/workspace/hello/BUILD:1:11)\n"
-            + "    which has a select() that chooses dep: //deps:dep_a\n"
+            + "    because of a select() that chooses dep: //deps:dep_a\n"
             + "    which lacks: //buildenv/foo:b");
   }
 
@@ -1141,7 +1232,7 @@ public class ConstraintsTest extends AbstractConstraintsTest {
             + " \n"
             + "  environment: //buildenv/foo:b\n"
             + "    removed by: //hello:lib (/workspace/hello/BUILD:1:11)\n"
-            + "    which has a select() that chooses dep: //deps:dep_a\n"
+            + "    because of a select() that chooses dep: //deps:dep_a\n"
             + "    which lacks: //buildenv/foo:b");
   }
 
@@ -1181,7 +1272,7 @@ public class ConstraintsTest extends AbstractConstraintsTest {
             + " \n"
             + "  environment: //buildenv/foo:b\n"
             + "    removed by: //hello:lib2 (/workspace/hello/BUILD:1:11)\n"
-            + "    which has a select() that chooses dep: //deps:dep_a\n"
+            + "    because of a select() that chooses dep: //deps:dep_a\n"
             + "    which lacks: //buildenv/foo:b");
   }
 
@@ -1209,7 +1300,7 @@ public class ConstraintsTest extends AbstractConstraintsTest {
             + " \n"
             + "  environment: //buildenv/foo:b\n"
             + "    removed by: //hello:lib (/workspace/hello/BUILD:1:11)\n"
-            + "    which has a select() that chooses dep: //deps:dep_a\n"
+            + "    because of a select() that chooses dep: //deps:dep_a\n"
             + "    which lacks: //buildenv/foo:b");
   }
 
@@ -1247,7 +1338,7 @@ public class ConstraintsTest extends AbstractConstraintsTest {
             + " \n"
             + "  environment: //buildenv/bar:c\n"
             + "    removed by: //hello:lib (/workspace/hello/BUILD:1:11)\n"
-            + "    which has a select() that chooses dep: //deps:dep_a\n"
+            + "    because of a select() that chooses dep: //deps:dep_a\n"
             + "    which lacks: //buildenv/bar:c");
   }
 
@@ -1288,14 +1379,15 @@ public class ConstraintsTest extends AbstractConstraintsTest {
             + " \n"
             + "  environment: //buildenv/foo:a\n"
             + "    removed by: //hello:lib (/workspace/hello/BUILD:9:11)\n"
-            + "    which has a select() that chooses dep: //hello:all_groups_gone\n"
-            + "    which lacks: //buildenv/foo:a\n"
-            + " \n"
-            + "environment group: //buildenv/bar:bar:\n"
+            + "    because of a select() that chooses dep: //hello:all_groups_gone\n"
+            + "    which lacks: //buildenv/foo:a\n");
+
+    assertContainsEvent(
+        "environment group: //buildenv/bar:bar:\n"
             + " \n"
             + "  environment: //buildenv/bar:c\n"
             + "    removed by: //hello:lib (/workspace/hello/BUILD:9:11)\n"
-            + "    which has a select() that chooses dep: //hello:all_groups_gone\n"
+            + "    because of a select() that chooses dep: //hello:all_groups_gone\n"
             + "    which lacks: //buildenv/bar:c");
   }
 

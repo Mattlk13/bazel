@@ -13,23 +13,27 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules.java;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.devtools.build.lib.packages.semantics.BuildLanguageOptions.INCOMPATIBLE_ENABLE_EXPORTS_PROVIDER;
+
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.PlatformOptions;
 import com.google.devtools.build.lib.analysis.platform.ConstraintValueInfo;
-import com.google.devtools.build.lib.analysis.platform.ToolchainInfo;
 import com.google.devtools.build.lib.analysis.starlark.StarlarkActionFactory;
 import com.google.devtools.build.lib.analysis.starlark.StarlarkRuleContext;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.collect.nestedset.Depset;
 import com.google.devtools.build.lib.packages.Provider;
-import com.google.devtools.build.lib.skylarkbuildapi.core.ProviderApi;
-import com.google.devtools.build.lib.skylarkbuildapi.java.JavaCommonApi;
-import com.google.devtools.build.lib.skylarkbuildapi.java.JavaToolchainStarlarkApiProviderApi;
-import com.google.devtools.build.lib.syntax.EvalException;
-import com.google.devtools.build.lib.syntax.Sequence;
-import com.google.devtools.build.lib.syntax.Starlark;
-import com.google.devtools.build.lib.syntax.StarlarkThread;
+import com.google.devtools.build.lib.rules.cpp.CcInfo;
+import com.google.devtools.build.lib.starlarkbuildapi.core.ProviderApi;
+import com.google.devtools.build.lib.starlarkbuildapi.java.JavaCommonApi;
+import com.google.devtools.build.lib.starlarkbuildapi.java.JavaToolchainStarlarkApiProviderApi;
+import java.util.Objects;
+import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.Sequence;
+import net.starlark.java.eval.Starlark;
+import net.starlark.java.eval.StarlarkList;
+import net.starlark.java.eval.StarlarkThread;
 
 /** A module that contains Starlark utilities for Java support. */
 public class JavaStarlarkCommon
@@ -37,7 +41,6 @@ public class JavaStarlarkCommon
         Artifact,
         JavaInfo,
         JavaToolchainProvider,
-        JavaRuntimeInfo,
         ConstraintValueInfo,
         StarlarkRuleContext,
         StarlarkActionFactory> {
@@ -61,20 +64,56 @@ public class JavaStarlarkCommon
       Object outputSourceJar,
       Sequence<?> javacOpts, // <String> expected
       Sequence<?> deps, // <JavaInfo> expected
-      Sequence<?> experimentalLocalCompileTimeDeps, // <JavaInfo> expected
+      Sequence<?> runtimeDeps, // <JavaInfo> expected
       Sequence<?> exports, // <JavaInfo> expected
-      Sequence<?> plugins, // <JavaInfo> expected
-      Sequence<?> exportedPlugins, // <JavaInfo> expected
+      Sequence<?> plugins, // <JavaPluginInfo> expected
+      Sequence<?> exportedPlugins, // <JavaPluginInfo> expected
+      Sequence<?> nativeLibraries, // <CcInfo> expected.
       Sequence<?> annotationProcessorAdditionalInputs, // <Artifact> expected
       Sequence<?> annotationProcessorAdditionalOutputs, // <Artifact> expected
       String strictDepsMode,
       JavaToolchainProvider javaToolchain,
-      JavaRuntimeInfo hostJavabase,
+      Object hostJavabase,
       Sequence<?> sourcepathEntries, // <Artifact> expected
       Sequence<?> resources, // <Artifact> expected
       Boolean neverlink,
+      Boolean enableAnnotationProcessing,
       StarlarkThread thread)
       throws EvalException, InterruptedException {
+
+    boolean acceptJavaInfo =
+        !starlarkRuleContext
+            .getRuleContext()
+            .getFragment(JavaConfiguration.class)
+            .requireJavaPluginInfo();
+
+    final ImmutableList<JavaPluginInfo> pluginsParam;
+    if (acceptJavaInfo && !plugins.isEmpty() && plugins.get(0) instanceof JavaInfo) {
+      // Handle deprecated case where plugins is given a list of JavaInfos
+      pluginsParam =
+          Sequence.cast(plugins, JavaInfo.class, "plugins").stream()
+              .map(JavaInfo::getJavaPluginInfo)
+              .filter(Objects::nonNull)
+              .collect(toImmutableList());
+    } else {
+      pluginsParam = Sequence.cast(plugins, JavaPluginInfo.class, "plugins").getImmutableList();
+    }
+
+    final ImmutableList<JavaPluginInfo> exportedPluginsParam;
+    if (acceptJavaInfo
+        && !exportedPlugins.isEmpty()
+        && exportedPlugins.get(0) instanceof JavaInfo) {
+      // Handle deprecated case where exported_plugins is given a list of JavaInfos
+      exportedPluginsParam =
+          Sequence.cast(exportedPlugins, JavaInfo.class, "exported_plugins").stream()
+              .map(JavaInfo::getJavaPluginInfo)
+              .filter(Objects::nonNull)
+              .collect(toImmutableList());
+    } else {
+      exportedPluginsParam =
+          Sequence.cast(exportedPlugins, JavaPluginInfo.class, "exported_plugins")
+              .getImmutableList();
+    }
 
     return JavaInfoBuildHelper.getInstance()
         .createJavaCompileAction(
@@ -85,13 +124,11 @@ public class JavaStarlarkCommon
             outputSourceJar == Starlark.NONE ? null : (Artifact) outputSourceJar,
             Sequence.cast(javacOpts, String.class, "javac_opts"),
             Sequence.cast(deps, JavaInfo.class, "deps"),
-            Sequence.cast(
-                experimentalLocalCompileTimeDeps,
-                JavaInfo.class,
-                "experimental_local_compile_time_deps"),
+            Sequence.cast(runtimeDeps, JavaInfo.class, "runtime_deps"),
             Sequence.cast(exports, JavaInfo.class, "exports"),
-            Sequence.cast(plugins, JavaInfo.class, "plugins"),
-            Sequence.cast(exportedPlugins, JavaInfo.class, "exported_plugins"),
+            pluginsParam,
+            exportedPluginsParam,
+            Sequence.cast(nativeLibraries, CcInfo.class, "native_libraries"),
             Sequence.cast(
                 annotationProcessorAdditionalInputs,
                 Artifact.class,
@@ -102,10 +139,10 @@ public class JavaStarlarkCommon
                 "annotation_processor_additional_outputs"),
             strictDepsMode,
             javaToolchain,
-            hostJavabase,
             ImmutableList.copyOf(Sequence.cast(sourcepathEntries, Artifact.class, "sourcepath")),
             Sequence.cast(resources, Artifact.class, "resources"),
             neverlink,
+            enableAnnotationProcessing,
             javaSemantics,
             thread);
   }
@@ -135,21 +172,21 @@ public class JavaStarlarkCommon
   @Override
   public Artifact packSources(
       StarlarkActionFactory actions,
-      Artifact outputJar,
+      Object outputJar,
+      Object outputSourceJar,
       Sequence<?> sourceFiles, // <Artifact> expected.
       Sequence<?> sourceJars, // <Artifact> expected.
       JavaToolchainProvider javaToolchain,
-      JavaRuntimeInfo hostJavabase)
+      Object hostJavabase)
       throws EvalException {
     return JavaInfoBuildHelper.getInstance()
         .packSourceFiles(
             actions,
-            outputJar,
-            /* outputSourceJar= */ null,
+            outputJar instanceof Artifact ? (Artifact) outputJar : null,
+            outputSourceJar instanceof Artifact ? (Artifact) outputSourceJar : null,
             Sequence.cast(sourceFiles, Artifact.class, "sources"),
             Sequence.cast(sourceJars, Artifact.class, "source_jars"),
-            javaToolchain,
-            hostJavabase);
+            javaToolchain);
   }
 
   @Override
@@ -162,9 +199,12 @@ public class JavaStarlarkCommon
   }
 
   @Override
-  public JavaInfo mergeJavaProviders(Sequence<?> providers /* <JavaInfo> expected. */)
+  public JavaInfo mergeJavaProviders(
+      Sequence<?> providers, /* <JavaInfo> expected. */ StarlarkThread thread)
       throws EvalException {
-    return JavaInfo.merge(Sequence.cast(providers, JavaInfo.class, "providers"));
+    return JavaInfo.merge(
+        Sequence.cast(providers, JavaInfo.class, "providers"),
+        thread.getSemantics().getBool(INCOMPATIBLE_ENABLE_EXPORTS_PROVIDER));
   }
 
   // TODO(b/65113771): Remove this method because it's incorrect.
@@ -181,12 +221,12 @@ public class JavaStarlarkCommon
 
   @Override
   public Provider getJavaToolchainProvider() {
-    return ToolchainInfo.PROVIDER;
+    return JavaToolchainProvider.PROVIDER;
   }
 
   @Override
   public Provider getJavaRuntimeProvider() {
-    return ToolchainInfo.PROVIDER;
+    return JavaRuntimeInfo.PROVIDER;
   }
 
   @Override
@@ -214,6 +254,13 @@ public class JavaStarlarkCommon
   }
 
   @Override
+  public Sequence<String> getConstraints(JavaInfo javaInfo) {
+    // No implementation in Bazel. This method not callable in Starlark except through
+    // (discouraged) use of --experimental_google_legacy_api.
+    return StarlarkList.empty();
+  }
+
+  @Override
   public JavaInfo removeAnnotationProcessors(JavaInfo javaInfo) {
     // No implementation in Bazel. This method not callable in Starlark except through
     // (discouraged) use of --experimental_google_legacy_api.
@@ -235,21 +282,6 @@ public class JavaStarlarkCommon
   }
 
   @Override
-  public Depset /*<Artifact>*/ getCompileTimeJavaDependencyArtifacts(JavaInfo javaInfo) {
-    // No implementation in Bazel. This method not callable in Starlark except through
-    // (discouraged) use of --experimental_google_legacy_api.
-    return null;
-  }
-
-  @Override
-  public JavaInfo addCompileTimeJavaDependencyArtifacts(
-      JavaInfo javaInfo, Sequence<?> compileTimeJavaDependencyArtifacts) throws EvalException {
-    // No implementation in Bazel. This method not callable in Starlark except through
-    // (discouraged) use of --experimental_google_legacy_api.
-    return null;
-  }
-
-  @Override
   public Label getJavaToolchainLabel(JavaToolchainStarlarkApiProviderApi toolchain)
       throws EvalException {
     // No implementation in Bazel. This method not callable in Starlark except through
@@ -259,8 +291,6 @@ public class JavaStarlarkCommon
 
   @Override
   public ProviderApi getBootClassPathInfo() {
-    // No implementation in Bazel. This method not callable in Starlark except through
-    // (discouraged) use of --experimental_google_legacy_api.
-    return null;
+    return BootClassPathInfo.PROVIDER;
   }
 }

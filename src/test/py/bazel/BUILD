@@ -1,4 +1,3 @@
-load("@rules_cc//cc:defs.bzl", "cc_binary")
 load("//tools/python:private/defs.bzl", "py_library", "py_test")
 
 package(default_visibility = ["//visibility:private"])
@@ -29,6 +28,7 @@ py_library(
         "//third_party/def_parser:__pkg__",
         "//tools/android:__pkg__",
         "//tools/build_rules:__pkg__",
+        "//tools/ctexplain:__pkg__",
         "//tools/python:__pkg__",
     ],
 )
@@ -76,7 +76,10 @@ py_test(
     tags = [
         "requires-network",
     ],
-    deps = [":test_base"],
+    deps = [
+        ":test_base",
+        "//third_party/py/six",
+    ],
 )
 
 py_test(
@@ -247,21 +250,4 @@ py_test(
     name = "bazel_workspace_test",
     srcs = ["bazel_workspace_test.py"],
     deps = [":test_base"],
-)
-
-test_suite(
-    name = "windows_tests",
-    tags = [
-        "-no_windows",
-        "-slow",
-    ],
-    visibility = ["//visibility:private"],
-)
-
-test_suite(
-    name = "all_windows_tests",
-    tests = [
-        ":windows_tests",
-    ],
-    visibility = ["//src:__pkg__"],
 )

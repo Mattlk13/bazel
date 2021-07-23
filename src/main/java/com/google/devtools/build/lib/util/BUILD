@@ -46,7 +46,7 @@ java_library(
         ":os",
         "//src/main/java/com/google/devtools/build/lib/concurrent",
         "//src/main/java/com/google/devtools/build/lib/unix",
-        "//src/main/java/com/google/devtools/build/lib/windows/jni:processes",
+        "//src/main/java/com/google/devtools/build/lib/windows:processes",
     ],
 )
 
@@ -103,9 +103,32 @@ java_library(
     deps = [
         "//src/main/java/com/google/devtools/build/lib/actions:localhost_capacity",
         "//src/main/java/com/google/devtools/common/options",
-        "//third_party:apache_commons_lang",
         "//third_party:guava",
         "//third_party:jsr305",
+    ],
+)
+
+java_library(
+    name = "cpu_resource_converter",
+    srcs = [
+        "CpuResourceConverter.java",
+    ],
+    deps = [
+        ":resource_converter",
+        "//src/main/java/com/google/devtools/build/lib/actions:localhost_capacity",
+        "//third_party:guava",
+    ],
+)
+
+java_library(
+    name = "ram_resource_converter",
+    srcs = [
+        "RamResourceConverter.java",
+    ],
+    deps = [
+        ":resource_converter",
+        "//src/main/java/com/google/devtools/build/lib/actions:localhost_capacity",
+        "//third_party:guava",
     ],
 )
 
@@ -114,9 +137,7 @@ java_library(
     srcs = [
         "AbstractIndexer.java",
         "AnsiStrippingOutputStream.java",
-        "BigIntegerFingerprint.java",
         "BigIntegerFingerprintUtils.java",
-        "BinaryPredicate.java",
         "CPU.java",
         "CanonicalStringIndexer.java",
         "ClassName.java",
@@ -126,11 +147,11 @@ java_library(
         "Fingerprint.java",
         "GroupedList.java",
         "JavaSleeper.java",
-        "LazyString.java",
         "LogHandlerQuerier.java",
         "LoggingUtil.java",
         "LongArrayList.java",
         "NetUtil.java",
+        "OnDemandString.java",
         "OptionsUtils.java",
         "OrderedSetMultimap.java",
         "OsUtils.java",
@@ -232,6 +253,7 @@ java_library(
         "ExitCode.java",
     ],
     deps = [
+        "//third_party:error_prone_annotations",
         "//third_party:guava",
         "//third_party:jsr305",
     ],

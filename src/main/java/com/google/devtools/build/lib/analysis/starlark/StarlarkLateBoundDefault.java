@@ -14,27 +14,25 @@
 
 package com.google.devtools.build.lib.analysis.starlark;
 
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.google.common.base.Preconditions;
-import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
 import com.google.common.collect.ImmutableMap;
-import com.google.devtools.build.lib.analysis.skylark.annotations.StarlarkConfigurationField;
+import com.google.devtools.build.lib.analysis.starlark.annotations.StarlarkConfigurationField;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.packages.Attribute.AbstractLabelLateBoundDefault;
 import com.google.devtools.build.lib.packages.Attribute.LateBoundDefault;
 import com.google.devtools.build.lib.packages.AttributeMap;
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
-import com.google.devtools.build.lib.skylarkbuildapi.LateBoundDefaultApi;
-import com.google.devtools.build.lib.syntax.Printer;
+import com.google.devtools.build.lib.starlarkbuildapi.LateBoundDefaultApi;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Map;
-import java.util.concurrent.ExecutionException;
 import javax.annotation.concurrent.Immutable;
+import net.starlark.java.annot.StarlarkAnnotations;
 import net.starlark.java.annot.StarlarkBuiltin;
-import net.starlark.java.annot.StarlarkInterfaceUtils;
+import net.starlark.java.eval.Printer;
 
 /**
  * An implementation of {@link LateBoundDefault} which obtains a late-bound attribute value (of type
@@ -124,7 +122,7 @@ public class StarlarkLateBoundDefault<FragmentT> extends AbstractLabelLateBoundD
 
   @Override
   public void repr(Printer printer) {
-    printer.format("<late-bound default>");
+    printer.append("<late-bound default>");
   }
 
   /** For use by @AutoCodec since the {@link #defaultValue} field is hard for it to process. */
@@ -183,46 +181,44 @@ public class StarlarkLateBoundDefault<FragmentT> extends AbstractLabelLateBoundD
    * with {@link StarlarkConfigurationField} to be considered.
    */
   private static final LoadingCache<CacheKey, Map<String, StarlarkLateBoundDefault<?>>> fieldCache =
-      CacheBuilder.newBuilder()
+      Caffeine.newBuilder()
           .initialCapacity(10)
           .maximumSize(100)
           .build(
-              new CacheLoader<CacheKey, Map<String, StarlarkLateBoundDefault<?>>>() {
-                @Override
-                public Map<String, StarlarkLateBoundDefault<?>> load(CacheKey key)
-                    throws Exception {
-                  ImmutableMap.Builder<String, StarlarkLateBoundDefault<?>> lateBoundDefaultMap =
-                      new ImmutableMap.Builder<>();
-                  Class<?> fragmentClass = key.fragmentClass;
-                  StarlarkBuiltin fragmentModule =
-                      StarlarkInterfaceUtils.getStarlarkBuiltin(fragmentClass);
+              key -> {
+                ImmutableMap.Builder<String, StarlarkLateBoundDefault<?>> lateBoundDefaultMap =
+                    new ImmutableMap.Builder<>();
+                Class<?> fragmentClass = key.fragmentClass;
+                StarlarkBuiltin fragmentModule =
+                    StarlarkAnnotations.getStarlarkBuiltin(fragmentClass);
 
-                  if (fragmentModule != null) {
-                    for (Method method : fragmentClass.getMethods()) {
-                      if (method.isAnnotationPresent(StarlarkConfigurationField.class)) {
-                        // TODO(b/68817606): Use annotation processors to verify these constraints.
-                        Preconditions.checkArgument(
-                            method.getReturnType() == Label.class,
-                            String.format("Method %s must have return type 'Label'", method));
-                        Preconditions.checkArgument(
-                            method.getParameterTypes().length == 0,
-                            String.format("Method %s must not accept arguments", method));
+                if (fragmentModule != null) {
+                  for (Method method : fragmentClass.getMethods()) {
+                    if (method.isAnnotationPresent(StarlarkConfigurationField.class)) {
+                      // TODO(b/68817606): Use annotation processors to verify these constraints.
+                      Preconditions.checkArgument(
+                          method.getReturnType() == Label.class,
+                          "Method %s must have return type 'Label'",
+                          method);
+                      Preconditions.checkArgument(
+                          method.getParameterTypes().length == 0,
+                          "Method %s must not accept arguments",
+                          method);
 
-                        StarlarkConfigurationField configField =
-                            method.getAnnotation(StarlarkConfigurationField.class);
-                        lateBoundDefaultMap.put(
-                            configField.name(),
-                            new StarlarkLateBoundDefault<>(
-                                configField,
-                                fragmentClass,
-                                fragmentModule.name(),
-                                method,
-                                key.toolsRepository));
-                      }
+                      StarlarkConfigurationField configField =
+                          method.getAnnotation(StarlarkConfigurationField.class);
+                      lateBoundDefaultMap.put(
+                          configField.name(),
+                          new StarlarkLateBoundDefault<>(
+                              configField,
+                              fragmentClass,
+                              fragmentModule.name(),
+                              method,
+                              key.toolsRepository));
                     }
                   }
-                  return lateBoundDefaultMap.build();
                 }
+                return lateBoundDefaultMap.build();
               });
 
   /**
@@ -241,11 +237,10 @@ public class StarlarkLateBoundDefault<FragmentT> extends AbstractLabelLateBoundD
   public static <FragmentT> StarlarkLateBoundDefault<FragmentT> forConfigurationField(
       Class<FragmentT> fragmentClass, String fragmentFieldName, String toolsRepository)
       throws InvalidConfigurationFieldException {
-    try {
       CacheKey cacheKey = new CacheKey(fragmentClass, toolsRepository);
       StarlarkLateBoundDefault<?> resolver = fieldCache.get(cacheKey).get(fragmentFieldName);
       if (resolver == null) {
-        StarlarkBuiltin moduleAnnotation = StarlarkInterfaceUtils.getStarlarkBuiltin(fragmentClass);
+        StarlarkBuiltin moduleAnnotation = StarlarkAnnotations.getStarlarkBuiltin(fragmentClass);
         if (moduleAnnotation == null) {
           throw new AssertionError("fragment class must have a valid Starlark name");
         }
@@ -254,9 +249,6 @@ public class StarlarkLateBoundDefault<FragmentT> extends AbstractLabelLateBoundD
                 fragmentFieldName, moduleAnnotation.name()));
       }
       return (StarlarkLateBoundDefault<FragmentT>) resolver; // unchecked cast
-    } catch (ExecutionException e) {
-      throw new IllegalStateException("method invocation failed: " + e);
-    }
   }
 
 }

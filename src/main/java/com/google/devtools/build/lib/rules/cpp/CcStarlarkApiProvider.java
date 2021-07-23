@@ -23,7 +23,7 @@ import com.google.devtools.build.lib.collect.nestedset.Depset;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
-import com.google.devtools.build.lib.skylarkbuildapi.cpp.CcStarlarkApiProviderApi;
+import com.google.devtools.build.lib.starlarkbuildapi.cpp.CcStarlarkApiProviderApi;
 import com.google.devtools.build.lib.vfs.PathFragment;
 
 /**
@@ -85,7 +85,7 @@ public final class CcStarlarkApiProvider extends StarlarkApiProvider
         getInfo().get(CcInfo.PROVIDER).getCcCompilationContext();
     return ccCompilationContext == null
         ? ImmutableList.<String>of()
-        : ccCompilationContext.getDefines().toList();
+        : ccCompilationContext.getDefines();
   }
 
   @Override
@@ -136,7 +136,7 @@ public final class CcStarlarkApiProvider extends StarlarkApiProvider
         getInfo().get(CcInfo.PROVIDER).getCcCompilationContext();
 
     ImmutableList.Builder<String> options = ImmutableList.builder();
-    for (String define : ccCompilationContext.getDefines().toList()) {
+    for (String define : ccCompilationContext.getDefines()) {
       options.add("-D" + define);
     }
     for (PathFragment path : ccCompilationContext.getSystemIncludeDirs()) {

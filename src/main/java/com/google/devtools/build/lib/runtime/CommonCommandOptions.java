@@ -216,26 +216,16 @@ public class CommonCommandOptions extends OptionsBase {
   public String oomMessage;
 
   @Option(
-      name = "incompatible_enable_profile_by_default",
-      defaultValue = "true",
-      documentationCategory = OptionDocumentationCategory.LOGGING,
-      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.BAZEL_MONITORING},
-      metadataTags = {
-        OptionMetadataTag.INCOMPATIBLE_CHANGE,
-        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
-      },
-      help = "If enabled, Bazel will generate a JSON profile by default.")
-  public boolean enableProfileByDefault;
-
-  @Option(
-      name = "experimental_generate_json_trace_profile",
-      defaultValue = "false",
+      name = "generate_json_trace_profile",
+      oldName = "experimental_generate_json_trace_profile",
+      defaultValue = "auto",
       documentationCategory = OptionDocumentationCategory.LOGGING,
       effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.BAZEL_MONITORING},
       help =
           "If enabled, Bazel profiles the build and writes a JSON-format profile into a file in"
-              + " the output base. View profile by loading into chrome://tracing.")
-  public boolean enableTracer;
+              + " the output base. View profile by loading into chrome://tracing. By default Bazel"
+              + " writes the profile for all build-like commands and query.")
+  public TriState enableTracer;
 
   @Option(
       name = "json_trace_compression",
@@ -251,7 +241,7 @@ public class CommonCommandOptions extends OptionsBase {
 
   @Option(
       name = "experimental_profile_cpu_usage",
-      defaultValue = "false",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.LOGGING,
       effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.BAZEL_MONITORING},
       help = "If set, Bazel will measure cpu usage and add it to the JSON profile.")
@@ -310,7 +300,7 @@ public class CommonCommandOptions extends OptionsBase {
       defaultValue = "null",
       documentationCategory = OptionDocumentationCategory.LOGGING,
       effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.BAZEL_MONITORING},
-      converter = OptionsUtils.PathFragmentConverter.class,
+      converter = OptionsUtils.AbsolutePathFragmentConverter.class,
       help =
           "If set, profile Bazel and write data to the specified "
               + "file. Use bazel analyze-profile to analyze the profile.")
@@ -341,7 +331,7 @@ public class CommonCommandOptions extends OptionsBase {
       defaultValue = "null",
       documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
       effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.BAZEL_MONITORING},
-      converter = OptionsUtils.PathFragmentConverter.class,
+      converter = OptionsUtils.AbsolutePathFragmentConverter.class,
       help =
           "If set, write memory usage data to the specified file at phase ends and stable heap to"
               + " master log at end of build.")
@@ -368,6 +358,19 @@ public class CommonCommandOptions extends OptionsBase {
           "If this flag is set to a value less than 100, Bazel will OOM if, after two full GC's, "
               + "more than this percentage of the (old gen) heap is still occupied.")
   public int oomMoreEagerlyThreshold;
+
+  @Option(
+      name = "heap_dump_on_oom",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.LOGGING,
+      effectTags = {OptionEffectTag.BAZEL_MONITORING},
+      help =
+          "Whether to manually output a heap dump if an OOM is thrown (including OOMs due to"
+              + " --experimental_oom_more_eagerly_threshold). The dump will be written to"
+              + " <output_base>/<invocation_id>.heapdump.hprof. This option effectively replaces"
+              + " -XX:+HeapDumpOnOutOfMemoryError, which has no effect because OOMs are caught and"
+              + " redirected to Runtime#halt.")
+  public boolean heapDumpOnOom;
 
   @Option(
       name = "startup_time",
@@ -500,6 +503,20 @@ public class CommonCommandOptions extends OptionsBase {
               + "finishes. Subsequent builds will not have any incrementality with respect to this "
               + "one.")
   public boolean keepStateAfterBuild;
+
+  @Option(
+      name = "repo_env",
+      converter = Converters.OptionalAssignmentConverter.class,
+      allowMultiple = true,
+      defaultValue = "null",
+      documentationCategory = OptionDocumentationCategory.OUTPUT_PARAMETERS,
+      effectTags = {OptionEffectTag.ACTION_COMMAND_LINES},
+      help =
+          "Specifies additional environment variables to be available only for repository rules."
+              + " Note that repository rules see the full environment anyway, but in this way"
+              + " configuration information can be passed to repositories through options without"
+              + " invalidating the action graph.")
+  public List<Map.Entry<String, String>> repositoryEnvironment;
 
   /** The option converter to check that the user can only specify legal profiler tasks. */
   public static class ProfilerTaskConverter extends EnumConverter<ProfilerTask> {

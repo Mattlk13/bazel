@@ -17,24 +17,25 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType.ABSTRACT;
 import static com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType.TEST;
+import static java.nio.charset.StandardCharsets.UTF_8;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.ImmutableSortedSet;
+import com.google.common.io.ByteStreams;
 import com.google.devtools.build.lib.actions.ActionEnvironment;
 import com.google.devtools.build.lib.analysis.RuleContext.PrerequisiteValidator;
 import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoFactory;
 import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoKey;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
-import com.google.devtools.build.lib.analysis.config.ConfigurationFragmentFactory;
-import com.google.devtools.build.lib.analysis.config.ConvenienceSymlinks.SymlinkDefinition;
 import com.google.devtools.build.lib.analysis.config.Fragment;
+import com.google.devtools.build.lib.analysis.config.FragmentClassSet;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
 import com.google.devtools.build.lib.analysis.config.FragmentProvider;
+import com.google.devtools.build.lib.analysis.config.SymlinkDefinition;
 import com.google.devtools.build.lib.analysis.config.transitions.ComposingTransitionFactory;
 import com.google.devtools.build.lib.analysis.config.transitions.PatchTransition;
 import com.google.devtools.build.lib.analysis.config.transitions.TransitionFactory;
@@ -52,11 +53,18 @@ import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.ThirdPartyLicenseExistencePolicy;
 import com.google.devtools.build.lib.packages.SymbolGenerator;
-import com.google.devtools.build.lib.skylarkbuildapi.core.Bootstrap;
-import com.google.devtools.build.lib.syntax.StarlarkThread;
+import com.google.devtools.build.lib.starlarkbuildapi.core.Bootstrap;
+import com.google.devtools.build.lib.vfs.DigestHashFunction;
+import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.vfs.Root;
+import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDefinition;
 import com.google.devtools.common.options.OptionsProvider;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
@@ -68,9 +76,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 import javax.annotation.Nullable;
+import net.starlark.java.annot.StarlarkAnnotations;
 import net.starlark.java.annot.StarlarkBuiltin;
-import net.starlark.java.annot.StarlarkInterfaceUtils;
+import net.starlark.java.eval.StarlarkThread;
 
 /**
  * Knows about every rule Blaze supports and the associated configuration options.
@@ -93,6 +104,31 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
     ImmutableList<RuleSet> requires();
   }
 
+  /** An InMemoryFileSystem for bundled builtins .bzl files. */
+  public static class BundledFileSystem extends InMemoryFileSystem {
+
+    private static final byte[] EMPTY_DIGEST = new byte[0];
+
+    public BundledFileSystem() {
+      super(DigestHashFunction.SHA256);
+    }
+
+    // Bundled files are guaranteed to not change throughout the lifetime of the Bazel server, so it
+    // is permissible to use a fake digest. This helps avoid peculiarities in the interaction of
+    // InMemoryFileSystem and Skyframe. See cl/354809138 for further discussion, including of
+    // possible (but unlikely) future caveats of this approach.
+
+    @Override
+    protected synchronized byte[] getFastDigest(PathFragment path) {
+      return EMPTY_DIGEST;
+    }
+
+    @Override
+    protected synchronized byte[] getDigest(PathFragment path) throws IOException {
+      return EMPTY_DIGEST;
+    }
+  }
+
   /** Builder for {@link ConfiguredRuleClassProvider}. */
   public static class Builder implements RuleDefinitionEnvironment {
     private final StringBuilder defaultWorkspaceFilePrefix = new StringBuilder();
@@ -100,19 +136,19 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
     private Label preludeLabel;
     private String runfilesPrefix;
     private String toolsRepository;
-    private final List<ConfigurationFragmentFactory> configurationFragmentFactories =
-        new ArrayList<>();
+    @Nullable private String builtinsBzlZipResource;
+    private boolean useDummyBuiltinsBzlInsteadOfResource = false;
+    @Nullable private String builtinsBzlPackagePathInSource;
+    private final List<Class<? extends Fragment>> configurationFragmentClasses = new ArrayList<>();
     private final List<BuildInfoFactory> buildInfoFactories = new ArrayList<>();
     private final Set<Class<? extends FragmentOptions>> configurationOptions =
         new LinkedHashSet<>();
 
     private final Map<String, RuleClass> ruleClassMap = new HashMap<>();
     private final Map<String, RuleDefinition> ruleDefinitionMap = new HashMap<>();
-    private final Map<String, NativeAspectClass> nativeAspectClassMap =
-        new HashMap<>();
+    private final Map<String, NativeAspectClass> nativeAspectClassMap = new HashMap<>();
     private final Map<Class<? extends RuleDefinition>, RuleClass> ruleMap = new HashMap<>();
-    private final Digraph<Class<? extends RuleDefinition>> dependencyGraph =
-        new Digraph<>();
+    private final Digraph<Class<? extends RuleDefinition>> dependencyGraph = new Digraph<>();
     private final List<Class<? extends Fragment>> universalFragments = new ArrayList<>();
     @Nullable private TransitionFactory<Rule> trimmingTransitionFactory = null;
     @Nullable private PatchTransition toolchainTaggedTrimmingTransition = null;
@@ -120,11 +156,13 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
         OptionsDiffPredicate.ALWAYS_INVALIDATE;
     private PrerequisiteValidator prerequisiteValidator;
     private final ImmutableList.Builder<Bootstrap> starlarkBootstraps = ImmutableList.builder();
-    private ImmutableMap.Builder<String, Object> starlarkAccessibleTopLevels =
+    private final ImmutableMap.Builder<String, Object> starlarkAccessibleTopLevels =
+        ImmutableMap.builder();
+    private final ImmutableMap.Builder<String, Object> starlarkBuiltinsInternals =
         ImmutableMap.builder();
     private final ImmutableList.Builder<SymlinkDefinition> symlinkDefinitions =
         ImmutableList.builder();
-    private Set<String> reservedActionMnemonics = new TreeSet<>();
+    private final Set<String> reservedActionMnemonics = new TreeSet<>();
     private BuildConfiguration.ActionEnvironmentProvider actionEnvironmentProvider =
         (BuildOptions options) -> ActionEnvironment.EMPTY;
     private ConstraintSemantics<RuleContext> constraintSemantics =
@@ -132,7 +170,6 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
 
     private ThirdPartyLicenseExistencePolicy thirdPartyLicenseExistencePolicy =
         ThirdPartyLicenseExistencePolicy.USER_CONTROLLABLE;
-    private boolean enableExecutionTransition = false;
 
     public Builder addWorkspaceFilePrefix(String contents) {
       defaultWorkspaceFilePrefix.append(contents);
@@ -171,6 +208,47 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
       return this;
     }
 
+    /**
+     * Sets the resource path to the builtins_bzl.zip resource.
+     *
+     * <p>This value is required for production uses. For uses in tests, this may be left null, but
+     * the resulting rule class provider will not work with {@code
+     * --experimental_builtins_bzl_path=%bundled%}. Alternatively, tests may call {@link
+     * #useDummyBuiltinsBzl} if they do not rely on any native rules that may be migratable to
+     * Starlark.
+     */
+    public Builder setBuiltinsBzlZipResource(String name) {
+      this.builtinsBzlZipResource = name;
+      this.useDummyBuiltinsBzlInsteadOfResource = false;
+      return this;
+    }
+
+    /**
+     * Instructs the rule class provider to use a set of dummy builtins definitions that inject no
+     * symbols.
+     *
+     * <p>This is only suitable for use in tests, and only when the test does not depend (even
+     * implicitly) on native rules. For example, pure tests of package loading behavior may call
+     * this method, but not tests that use AnalysisMock. Otherwise the test may break when a native
+     * rule is migrated to Starlark via builtins injection.
+     */
+    public Builder useDummyBuiltinsBzl() {
+      this.builtinsBzlZipResource = null;
+      this.useDummyBuiltinsBzlInsteadOfResource = true;
+      return this;
+    }
+
+    /**
+     * Sets the relative location of the builtins_bzl directory within a Bazel source tree.
+     *
+     * <p>This is required if the rule class provider will be used with {@code
+     * --experimental_builtins_bzl_path=%workspace%}, but can be skipped in unit tests.
+     */
+    public Builder setBuiltinsBzlPackagePathInSource(String path) {
+      this.builtinsBzlPackagePathInSource = path;
+      return this;
+    }
+
     public Builder setPrerequisiteValidator(PrerequisiteValidator prerequisiteValidator) {
       this.prerequisiteValidator = prerequisiteValidator;
       return this;
@@ -198,22 +276,22 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
     }
 
     /**
-     * Adds a configuration fragment factory and all build options required by its fragment.
+     * Adds a configuration fragment and all build options required by its fragment.
      *
      * <p>Note that configuration fragments annotated with a Starlark name must have a unique name;
      * no two different configuration fragments can share the same name.
      */
-    public Builder addConfigurationFragment(ConfigurationFragmentFactory factory) {
-      this.configurationOptions.addAll(factory.requiredOptions());
-      configurationFragmentFactories.add(factory);
+    public Builder addConfigurationFragment(Class<? extends Fragment> fragmentClass) {
+      this.configurationOptions.addAll(Fragment.requiredOptions(fragmentClass));
+      configurationFragmentClasses.add(fragmentClass);
       return this;
     }
 
     /**
      * Adds configuration options that aren't required by configuration fragments.
      *
-     * <p>If {@link #addConfigurationFragment(ConfigurationFragmentFactory)} adds a fragment factory
-     * that also requires these options, this method is redundant.
+     * <p>If {@link #addConfigurationFragment} adds a fragment that also requires these options,
+     * this method is redundant.
      */
     public Builder addConfigurationOptions(Class<? extends FragmentOptions> configurationOptions) {
       this.configurationOptions.add(configurationOptions);
@@ -235,6 +313,11 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
       return this;
     }
 
+    public Builder addStarlarkBuiltinsInternal(String name, Object object) {
+      this.starlarkBuiltinsInternals.put(name, object);
+      return this;
+    }
+
     public Builder addSymlinkDefinition(SymlinkDefinition symlinkDefinition) {
       this.symlinkDefinitions.add(symlinkDefinition);
       return this;
@@ -253,8 +336,8 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
 
     /**
      * Sets the logic that lets rules declare which environments they support and validates rules
-     * don't depend on rules that aren't compatible with the same environments. Defaults to
-     * {@ConstraintSemantics}. See {@ConstraintSemantics} for more details.
+     * don't depend on rules that aren't compatible with the same environments. Defaults to {@link
+     * ConstraintSemantics}. See {@link ConstraintSemantics} for more details.
      */
     public Builder setConstraintSemantics(ConstraintSemantics<RuleContext> constraintSemantics) {
       this.constraintSemantics = constraintSemantics;
@@ -303,7 +386,7 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
     /**
      * Overrides the transition factory run over all targets.
      *
-     * @see {@link #addTrimmingTransitionFactory(TransitionFactory<Rule>)}
+     * @see #addTrimmingTransitionFactory(TransitionFactory)
      */
     @VisibleForTesting(/* for testing trimming transition factories without relying on prod use */ )
     public Builder overrideTrimmingTransitionFactoryForTesting(TransitionFactory<Rule> factory) {
@@ -324,16 +407,6 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
       return this;
     }
 
-    @Override
-    public boolean enableExecutionTransition() {
-      return enableExecutionTransition;
-    }
-
-    public Builder enableExecutionTransition(boolean flag) {
-      this.enableExecutionTransition = flag;
-      return this;
-    }
-
     /**
      * Overrides the predicate which determines whether the analysis cache should be invalidated for
      * the given options diff.
@@ -345,20 +418,25 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
       return this.setShouldInvalidateCacheForOptionDiff(shouldInvalidateCacheForOptionDiff);
     }
 
-    private RuleConfiguredTargetFactory createFactory(
+    private static RuleConfiguredTargetFactory createFactory(
         Class<? extends RuleConfiguredTargetFactory> factoryClass) {
       try {
         Constructor<? extends RuleConfiguredTargetFactory> ctor = factoryClass.getConstructor();
         return ctor.newInstance();
-      } catch (NoSuchMethodException | IllegalAccessException | InstantiationException
+      } catch (NoSuchMethodException
+          | IllegalAccessException
+          | InstantiationException
           | InvocationTargetException e) {
         throw new IllegalStateException(e);
       }
     }
 
-    private RuleClass commitRuleDefinition(Class<? extends RuleDefinition> definitionClass) {
-      RuleDefinition instance = checkNotNull(ruleDefinitionMap.get(definitionClass.getName()),
-          "addRuleDefinition(new %s()) should be called before build()", definitionClass.getName());
+    private void commitRuleDefinition(Class<? extends RuleDefinition> definitionClass) {
+      RuleDefinition instance =
+          checkNotNull(
+              ruleDefinitionMap.get(definitionClass.getName()),
+              "addRuleDefinition(new %s()) should be called before build()",
+              definitionClass.getName());
 
       RuleDefinition.Metadata metadata = instance.getMetadata();
       checkArgument(
@@ -368,19 +446,18 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
       List<Class<? extends RuleDefinition>> ancestors = metadata.ancestors();
 
       checkArgument(
-          metadata.type() == ABSTRACT ^ metadata.factoryClass()
-              != RuleConfiguredTargetFactory.class);
+          metadata.type() == ABSTRACT
+              ^ metadata.factoryClass() != RuleConfiguredTargetFactory.class);
       checkArgument(
-          (metadata.type() != TEST)
-          || ancestors.contains(BaseRuleClasses.TestBaseRule.class));
+          (metadata.type() != TEST) || ancestors.contains(BaseRuleClasses.TestBaseRule.class));
 
       RuleClass[] ancestorClasses = new RuleClass[ancestors.size()];
       for (int i = 0; i < ancestorClasses.length; i++) {
         ancestorClasses[i] = ruleMap.get(ancestors.get(i));
         if (ancestorClasses[i] == null) {
           // Ancestors should have been initialized by now
-          throw new IllegalStateException("Ancestor " + ancestors.get(i) + " of "
-              + metadata.name() + " is not initialized");
+          throw new IllegalStateException(
+              "Ancestor " + ancestors.get(i) + " of " + metadata.name() + " is not initialized");
         }
       }
 
@@ -389,16 +466,42 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
         factory = createFactory(metadata.factoryClass());
       }
 
-      RuleClass.Builder builder = new RuleClass.Builder(
-          metadata.name(), metadata.type(), false, ancestorClasses);
+      RuleClass.Builder builder =
+          new RuleClass.Builder(metadata.name(), metadata.type(), false, ancestorClasses);
       builder.factory(factory);
       builder.setThirdPartyLicenseExistencePolicy(thirdPartyLicenseExistencePolicy);
       RuleClass ruleClass = instance.build(builder, this);
       ruleMap.put(definitionClass, ruleClass);
       ruleClassMap.put(ruleClass.getName(), ruleClass);
       ruleDefinitionMap.put(ruleClass.getName(), instance);
+    }
 
-      return ruleClass;
+    /**
+     * Locates the builtins zip file as a Java resource, and unpacks it into the given directory.
+     * Note that the builtins_bzl/ entry itself in the zip is not copied, just its children.
+     */
+    private static void unpackBuiltinsBzlZipResource(String builtinsResourceName, Path targetRoot) {
+      ClassLoader loader = ConfiguredRuleClassProvider.class.getClassLoader();
+      try (InputStream builtinsZip = loader.getResourceAsStream(builtinsResourceName)) {
+        Preconditions.checkArgument(
+            builtinsZip != null, "No resource with name %s", builtinsResourceName);
+
+        try (ZipInputStream zip = new ZipInputStream(builtinsZip)) {
+          for (ZipEntry entry = zip.getNextEntry(); entry != null; entry = zip.getNextEntry()) {
+            String entryName = entry.getName();
+            Preconditions.checkArgument(entryName.startsWith("builtins_bzl/"));
+            Path dest = targetRoot.getRelative(entryName.substring("builtins_bzl/".length()));
+
+            dest.getParentDirectory().createDirectoryAndParents();
+            try (OutputStream os = dest.getOutputStream()) {
+              ByteStreams.copy(zip, os);
+            }
+          }
+        }
+      } catch (IOException ex) {
+        throw new IllegalArgumentException(
+            "Error while unpacking builtins_bzl zip resource file", ex);
+      }
     }
 
     public ConfiguredRuleClassProvider build() {
@@ -407,10 +510,41 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
         commitRuleDefinition(ruleDefinition.getLabel());
       }
 
+      // Determine the bundled builtins root, if it exists.
+      Root builtinsRoot;
+      if (builtinsBzlZipResource == null && !useDummyBuiltinsBzlInsteadOfResource) {
+        // Use of --experimental_builtins_bzl_path=%bundled% is disallowed.
+        builtinsRoot = null;
+      } else {
+        BundledFileSystem fs = new BundledFileSystem();
+        Path builtinsPath = fs.getPath("/virtual_builtins_bzl");
+        if (builtinsBzlZipResource != null) {
+          // Production case.
+          unpackBuiltinsBzlZipResource(builtinsBzlZipResource, builtinsPath);
+        } else {
+          // Dummy case, use empty bundled builtins content.
+          try {
+            builtinsPath.createDirectoryAndParents();
+            try (OutputStream os = builtinsPath.getRelative("exports.bzl").getOutputStream()) {
+              String emptyExports =
+                  ("exported_rules = {}\n" //
+                      + "exported_toplevels = {}\n"
+                      + "exported_to_java = {}\n");
+              os.write(emptyExports.getBytes(UTF_8));
+            }
+          } catch (IOException ex) {
+            throw new IllegalStateException("Failed to write dummy builtins root", ex);
+          }
+        }
+        builtinsRoot = Root.fromPath(builtinsPath);
+      }
+
       return new ConfiguredRuleClassProvider(
           preludeLabel,
           runfilesPrefix,
           toolsRepository,
+          builtinsRoot,
+          builtinsBzlPackagePathInSource,
           ImmutableMap.copyOf(ruleClassMap),
           ImmutableMap.copyOf(ruleDefinitionMap),
           ImmutableMap.copyOf(nativeAspectClassMap),
@@ -418,13 +552,14 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
           defaultWorkspaceFileSuffix.toString(),
           ImmutableList.copyOf(buildInfoFactories),
           ImmutableList.copyOf(configurationOptions),
-          ImmutableList.copyOf(configurationFragmentFactories),
-          ImmutableList.copyOf(universalFragments),
+          FragmentClassSet.of(configurationFragmentClasses),
+          FragmentClassSet.of(universalFragments),
           trimmingTransitionFactory,
           toolchainTaggedTrimmingTransition,
           shouldInvalidateCacheForOptionDiff,
           prerequisiteValidator,
           starlarkAccessibleTopLevels.build(),
+          starlarkBuiltinsInternals.build(),
           starlarkBootstraps.build(),
           symlinkDefinitions.build(),
           ImmutableSet.copyOf(reservedActionMnemonics),
@@ -434,64 +569,57 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
     }
 
     @Override
-    public Label getToolsLabel(String labelValue) {
-      return Label.parseAbsoluteUnchecked(toolsRepository + labelValue);
-    }
-
-    @Override
     public String getToolsRepository() {
       return toolsRepository;
     }
   }
 
-  /**
-   * Default content that should be added at the beginning of the WORKSPACE file.
-   */
+  /** Default content that should be added at the beginning of the WORKSPACE file. */
   private final String defaultWorkspaceFilePrefix;
 
-  /**
-   * Default content that should be added at the end of the WORKSPACE file.
-   */
+  /** Default content that should be added at the end of the WORKSPACE file. */
   private final String defaultWorkspaceFileSuffix;
 
-
-  /**
-   * Label for the prelude file.
-   */
+  /** Label for the prelude file. */
   private final Label preludeLabel;
 
-  /**
-   * The default runfiles prefix.
-   */
+  /** The default runfiles prefix. */
   private final String runfilesPrefix;
 
-  /**
-   * The path to the tools repository.
-   */
+  /** The path to the tools repository. */
   private final String toolsRepository;
 
   /**
-   * Maps rule class name to the metaclass instance for that rule.
+   * Where the builtins bzl files are located (if not overridden by
+   * --experimental_builtins_bzl_path). Note that this lives in a separate InMemoryFileSystem.
+   *
+   * <p>May be null in tests, in which case --experimental_builtins_bzl_path must point to a
+   * builtins root.
    */
+  @Nullable private final Root bundledBuiltinsRoot;
+
+  /**
+   * The relative location of the builtins_bzl directory within a Bazel source tree.
+   *
+   * <p>May be null in tests, in which case --experimental_builtins_bzl_path may not be
+   * "%workspace%".
+   */
+  @Nullable private final String builtinsBzlPackagePathInSource;
+
+  /** Maps rule class name to the metaclass instance for that rule. */
   private final ImmutableMap<String, RuleClass> ruleClassMap;
 
-  /**
-   * Maps rule class name to the rule definition objects.
-   */
+  /** Maps rule class name to the rule definition objects. */
   private final ImmutableMap<String, RuleDefinition> ruleDefinitionMap;
 
-  /**
-   * Maps aspect name to the aspect factory meta class.
-   */
+  /** Maps aspect name to the aspect factory meta class. */
   private final ImmutableMap<String, NativeAspectClass> nativeAspectClassMap;
 
-  /**
-   * The configuration options that affect the behavior of the rules.
-   */
+  /** The configuration options that affect the behavior of the rules. */
   private final ImmutableList<Class<? extends FragmentOptions>> configurationOptions;
 
   /** The set of configuration fragment factories. */
-  private final ImmutableList<ConfigurationFragmentFactory> configurationFragmentFactories;
+  private final FragmentClassSet configurationFragmentClasses;
 
   /**
    * Maps build option names to matching config fragments. This is used to determine correct
@@ -513,13 +641,17 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
    * Configuration fragments that should be available to all rules even when they don't explicitly
    * require it.
    */
-  private final ImmutableList<Class<? extends Fragment>> universalFragments;
+  private final FragmentClassSet universalFragments;
+
+  private final FragmentClassSet allFragments;
 
   private final ImmutableList<BuildInfoFactory> buildInfoFactories;
 
   private final PrerequisiteValidator prerequisiteValidator;
 
   private final ImmutableMap<String, Object> nativeRuleSpecificBindings;
+
+  private final ImmutableMap<String, Object> starlarkBuiltinsInternals;
 
   private final ImmutableMap<String, Object> environment;
 
@@ -539,6 +671,8 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
       Label preludeLabel,
       String runfilesPrefix,
       String toolsRepository,
+      @Nullable Root bundledBuiltinsRoot,
+      @Nullable String builtinsBzlPackagePathInSource,
       ImmutableMap<String, RuleClass> ruleClassMap,
       ImmutableMap<String, RuleDefinition> ruleDefinitionMap,
       ImmutableMap<String, NativeAspectClass> nativeAspectClassMap,
@@ -546,13 +680,14 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
       String defaultWorkspaceFileSuffix,
       ImmutableList<BuildInfoFactory> buildInfoFactories,
       ImmutableList<Class<? extends FragmentOptions>> configurationOptions,
-      ImmutableList<ConfigurationFragmentFactory> configurationFragments,
-      ImmutableList<Class<? extends Fragment>> universalFragments,
+      FragmentClassSet configurationFragmentClasses,
+      FragmentClassSet universalFragments,
       @Nullable TransitionFactory<Rule> trimmingTransitionFactory,
       PatchTransition toolchainTaggedTrimmingTransition,
       OptionsDiffPredicate shouldInvalidateCacheForOptionDiff,
       PrerequisiteValidator prerequisiteValidator,
-      ImmutableMap<String, Object> starlarkAccessibleJavaClasses,
+      ImmutableMap<String, Object> starlarkAccessibleTopLevels,
+      ImmutableMap<String, Object> starlarkBuiltinsInternals,
       ImmutableList<Bootstrap> starlarkBootstraps,
       ImmutableList<SymlinkDefinition> symlinkDefinitions,
       ImmutableSet<String> reservedActionMnemonics,
@@ -562,6 +697,8 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
     this.preludeLabel = preludeLabel;
     this.runfilesPrefix = runfilesPrefix;
     this.toolsRepository = toolsRepository;
+    this.bundledBuiltinsRoot = bundledBuiltinsRoot;
+    this.builtinsBzlPackagePathInSource = builtinsBzlPackagePathInSource;
     this.ruleClassMap = ruleClassMap;
     this.ruleDefinitionMap = ruleDefinitionMap;
     this.nativeAspectClassMap = nativeAspectClassMap;
@@ -569,22 +706,24 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
     this.defaultWorkspaceFileSuffix = defaultWorkspaceFileSuffix;
     this.buildInfoFactories = buildInfoFactories;
     this.configurationOptions = configurationOptions;
-    this.configurationFragmentFactories = configurationFragments;
-    this.optionsToFragmentMap = computeOptionsToFragmentMap(configurationFragments);
+    this.configurationFragmentClasses = configurationFragmentClasses;
+    this.optionsToFragmentMap = computeOptionsToFragmentMap(configurationFragmentClasses);
     this.universalFragments = universalFragments;
     this.trimmingTransitionFactory = trimmingTransitionFactory;
     this.toolchainTaggedTrimmingTransition = toolchainTaggedTrimmingTransition;
     this.shouldInvalidateCacheForOptionDiff = shouldInvalidateCacheForOptionDiff;
     this.prerequisiteValidator = prerequisiteValidator;
     this.nativeRuleSpecificBindings =
-        createNativeRuleSpecificBindings(starlarkAccessibleJavaClasses, starlarkBootstraps);
+        createNativeRuleSpecificBindings(starlarkAccessibleTopLevels, starlarkBootstraps);
+    this.starlarkBuiltinsInternals = starlarkBuiltinsInternals;
     this.environment = createEnvironment(nativeRuleSpecificBindings);
     this.symlinkDefinitions = symlinkDefinitions;
     this.reservedActionMnemonics = reservedActionMnemonics;
     this.actionEnvironmentProvider = actionEnvironmentProvider;
-    this.configurationFragmentMap = createFragmentMap(configurationFragments);
+    this.configurationFragmentMap = createFragmentMap(configurationFragmentClasses);
     this.constraintSemantics = constraintSemantics;
     this.thirdPartyLicenseExistencePolicy = thirdPartyLicenseExistencePolicy;
+    this.allFragments = FragmentClassSet.union(configurationFragmentClasses, universalFragments);
   }
 
   /**
@@ -594,11 +733,11 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
    * that's all that's needed to satisfy the config_setting.
    */
   private static Map<String, Class<? extends Fragment>> computeOptionsToFragmentMap(
-      Iterable<ConfigurationFragmentFactory> configurationFragments) {
+      FragmentClassSet configurationFragments) {
     Map<String, Class<? extends Fragment>> result = new LinkedHashMap<>();
     Map<Class<? extends FragmentOptions>, Integer> visitedOptionsClasses = new HashMap<>();
-    for (ConfigurationFragmentFactory factory : configurationFragments) {
-      Set<Class<? extends FragmentOptions>> requiredOpts = factory.requiredOptions();
+    for (Class<? extends Fragment> fragment : configurationFragments) {
+      Set<Class<? extends FragmentOptions>> requiredOpts = Fragment.requiredOptions(fragment);
       for (Class<? extends FragmentOptions> optionsClass : requiredOpts) {
         Integer previousBest = visitedOptionsClasses.get(optionsClass);
         if (previousBest != null && previousBest <= requiredOpts.size()) {
@@ -610,7 +749,7 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
         visitedOptionsClasses.put(optionsClass, requiredOpts.size());
         for (Field field : optionsClass.getFields()) {
           if (field.isAnnotationPresent(Option.class)) {
-            result.put(field.getAnnotation(Option.class).name(), factory.creates());
+            result.put(field.getAnnotation(Option.class).name(), fragment);
           }
         }
       }
@@ -638,6 +777,18 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
   }
 
   @Override
+  @Nullable
+  public Root getBundledBuiltinsRoot() {
+    return bundledBuiltinsRoot;
+  }
+
+  @Override
+  @Nullable
+  public String getBuiltinsBzlPackagePathInSource() {
+    return builtinsBzlPackagePathInSource;
+  }
+
+  @Override
   public Map<String, RuleClass> getRuleClassMap() {
     return ruleClassMap;
   }
@@ -662,8 +813,8 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
 
   /** Returns the set of configuration fragments provided by this module. */
   @Override
-  public ImmutableList<ConfigurationFragmentFactory> getConfigurationFragments() {
-    return configurationFragmentFactories;
+  public FragmentClassSet getConfigurationFragments() {
+    return configurationFragmentClasses;
   }
 
   @Nullable
@@ -699,16 +850,12 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
     return shouldInvalidateCacheForOptionDiff.apply(newOptions, changedOption, oldValue, newValue);
   }
 
-  /**
-   * Returns the set of configuration options that are supported in this module.
-   */
+  /** Returns the set of configuration options that are supported in this module. */
   public ImmutableList<Class<? extends FragmentOptions>> getConfigurationOptions() {
     return configurationOptions;
   }
 
-  /**
-   * Returns the definition of the rule class definition with the specified name.
-   */
+  /** Returns the definition of the rule class definition with the specified name. */
   public RuleDefinition getRuleClassDefinition(String ruleClassName) {
     return ruleDefinitionMap.get(ruleClassName);
   }
@@ -717,13 +864,11 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
    * Returns the configuration fragment that should be available to all rules even when they don't
    * explicitly require it.
    */
-  public ImmutableList<Class<? extends Fragment>> getUniversalFragments() {
+  public FragmentClassSet getUniversalFragments() {
     return universalFragments;
   }
 
-  /**
-   * Creates a BuildOptions class for the given options taken from an optionsProvider.
-   */
+  /** Creates a BuildOptions class for the given options taken from an optionsProvider. */
   public BuildOptions createBuildOptions(OptionsProvider optionsProvider) {
     return BuildOptions.of(configurationOptions, optionsProvider);
   }
@@ -743,18 +888,17 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
       ImmutableMap<String, Object> nativeRuleSpecificBindings) {
     ImmutableMap.Builder<String, Object> envBuilder = ImmutableMap.builder();
     // Add predeclared symbols of the Bazel build language.
-    StarlarkModules.addStarlarkGlobalsToBuilder(envBuilder);
+    StarlarkModules.addPredeclared(envBuilder);
     // Add all the extensions registered with the rule class provider.
     envBuilder.putAll(nativeRuleSpecificBindings);
     return envBuilder.build();
   }
 
   private static ImmutableMap<String, Class<?>> createFragmentMap(
-      Iterable<ConfigurationFragmentFactory> configurationFragmentFactories) {
+      FragmentClassSet configurationFragments) {
     ImmutableMap.Builder<String, Class<?>> mapBuilder = ImmutableMap.builder();
-    for (ConfigurationFragmentFactory fragmentFactory : configurationFragmentFactories) {
-      Class<? extends Fragment> fragmentClass = fragmentFactory.creates();
-      StarlarkBuiltin fragmentModule = StarlarkInterfaceUtils.getStarlarkBuiltin(fragmentClass);
+    for (Class<? extends Fragment> fragmentClass : configurationFragments) {
+      StarlarkBuiltin fragmentModule = StarlarkAnnotations.getStarlarkBuiltin(fragmentClass);
       if (fragmentModule != null) {
         mapBuilder.put(fragmentModule.name(), fragmentClass);
       }
@@ -766,9 +910,14 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
   public ImmutableMap<String, Object> getNativeRuleSpecificBindings() {
     // Include rule-related stuff like CcInfo, but not core stuff like rule(). Essentially, this
     // is intended to include things that could in principle be migrated to Starlark (and hence
-    // should be overridable by @builtins); in practice it means anything specifically registered
-    // with the RuleClassProvider.
+    // should be overridable by @_builtins); in practice it means anything specifically
+    // registered with the RuleClassProvider.
     return nativeRuleSpecificBindings;
+  }
+
+  @Override
+  public ImmutableMap<String, Object> getStarlarkBuiltinsInternals() {
+    return starlarkBuiltinsInternals;
   }
 
   @Override
@@ -786,6 +935,7 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
             toolsRepository,
             configurationFragmentMap,
             repoMapping,
+            /*convertedLabelsInPackage=*/ new HashMap<>(),
             new SymbolGenerator<>(fileLabel),
             /*analysisRuleLabel=*/ null)
         .storeInThread(thread);
@@ -830,14 +980,8 @@ public /*final*/ class ConfiguredRuleClassProvider implements FragmentProvider {
   }
 
   /** Returns all registered {@link Fragment} classes. */
-  public ImmutableSortedSet<Class<? extends Fragment>> getAllFragments() {
-    ImmutableSortedSet.Builder<Class<? extends Fragment>> fragmentsBuilder =
-        ImmutableSortedSet.orderedBy(BuildConfiguration.lexicalFragmentSorter);
-    for (ConfigurationFragmentFactory factory : getConfigurationFragments()) {
-      fragmentsBuilder.add(factory.creates());
-    }
-    fragmentsBuilder.addAll(getUniversalFragments());
-    return fragmentsBuilder.build();
+  public FragmentClassSet getAllFragments() {
+    return allFragments;
   }
 
   /** Returns a reserved set of action mnemonics. These cannot be used from a Starlark action. */

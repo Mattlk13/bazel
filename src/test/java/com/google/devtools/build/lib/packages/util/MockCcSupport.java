@@ -13,6 +13,8 @@
 // limitations under the License.
 package com.google.devtools.build.lib.packages.util;
 
+import static java.util.stream.Collectors.joining;
+
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
@@ -33,6 +35,7 @@ import com.google.devtools.build.lib.rules.cpp.LinkCommandLine;
 import com.google.devtools.build.lib.testutil.TestConstants;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -80,6 +83,10 @@ public abstract class MockCcSupport {
   public static final String FDO_IMPLICIT_THINLTO = "fdo_implicit_thinlto";
 
   public static final String XFDO_IMPLICIT_THINLTO = "xbinaryfdo_implicit_thinlto";
+
+  public static final String FDO_SPLIT_FUNCTIONS = "fdo_split_functions";
+
+  public static final String SPLIT_FUNCTIONS = "split_functions";
 
   public static final ImmutableList<String> STATIC_LINK_TWEAKED_ARTIFACT_NAME_PATTERN =
       ImmutableList.of("static_library", "lib", ".lib");
@@ -183,16 +190,17 @@ public abstract class MockCcSupport {
 
   public void setupCcToolchainConfigForCpu(MockToolsConfig config, String... cpus)
       throws IOException {
-    String crosstoolTop = getCrosstoolTopPathForConfig(config);
     if (config.isRealFileSystem()) {
-      config.linkTools(getRealFilesystemTools(crosstoolTop));
+      String crosstoolTopPath = getRealFilesystemCrosstoolTopPath();
+      config.linkTools(getRealFilesystemTools(crosstoolTopPath));
+      writeToolchainsForRealFilesystemTools(config, crosstoolTopPath);
     } else {
       ImmutableList.Builder<CcToolchainConfig> toolchainConfigBuilder = ImmutableList.builder();
       toolchainConfigBuilder.add(CcToolchainConfig.getDefaultCcToolchainConfig());
       for (String cpu : cpus) {
         toolchainConfigBuilder.add(CcToolchainConfig.getCcToolchainConfigForCpu(cpu));
       }
-      new Crosstool(config, crosstoolTop)
+      new Crosstool(config, getMockCrosstoolPath(), getMockCrosstoolLabel())
           .setCcToolchainFile(readCcToolchainConfigFile())
           .setSupportedArchs(getCrosstoolArchs())
           .setToolchainConfigs(toolchainConfigBuilder.build())
@@ -207,17 +215,45 @@ public abstract class MockCcSupport {
 
   public void setupCcToolchainConfig(
       MockToolsConfig config, CcToolchainConfig.Builder ccToolchainConfig) throws IOException {
-    String crosstoolTop = getCrosstoolTopPathForConfig(config);
     if (config.isRealFileSystem()) {
-      config.linkTools(getRealFilesystemTools(crosstoolTop));
+      String crosstoolTopPath = getRealFilesystemCrosstoolTopPath();
+      config.linkTools(getRealFilesystemTools(crosstoolTopPath));
+      writeToolchainsForRealFilesystemTools(config, crosstoolTopPath);
     } else {
-      new Crosstool(config, crosstoolTop)
+      new Crosstool(config, getMockCrosstoolPath(), getMockCrosstoolLabel())
           .setCcToolchainFile(readCcToolchainConfigFile())
           .setSupportedArchs(getCrosstoolArchs())
           .setToolchainConfigs(ImmutableList.of(ccToolchainConfig.build()))
           .setSupportsHeaderParsing(true)
           .write();
     }
+  }
+
+  /** Writes a basic toolchain definition to keep the CC tests working. */
+  // TODO(cc-rules): Remove this when crosstool provides its own toolchain definitions.
+  private void writeToolchainsForRealFilesystemTools(
+      MockToolsConfig config, String crosstoolTopPath) throws IOException {
+    config.create(
+        "toolchains/BUILD",
+        "toolchain(",
+        "    name = 'k8-toolchain',",
+        "    toolchain = '//" + crosstoolTopPath + ":cc-compiler-k8-llvm',",
+        "    toolchain_type = '" + TestConstants.TOOLS_REPOSITORY + "//tools/cpp:toolchain_type',",
+        "    target_compatible_with = [",
+        "        '" + TestConstants.CONSTRAINTS_PACKAGE_ROOT + "cpu:x86_64',",
+        "        '" + TestConstants.CONSTRAINTS_PACKAGE_ROOT + "os:linux',",
+        "    ],",
+        ")",
+        "toolchain(",
+        "    name = 'arm-toolchain',",
+        "    toolchain = '//" + crosstoolTopPath + ":cc-compiler-arm-llvm',",
+        "    toolchain_type = '" + TestConstants.TOOLS_REPOSITORY + "//tools/cpp:toolchain_type',",
+        "    target_compatible_with = [",
+        "        '" + TestConstants.CONSTRAINTS_PACKAGE_ROOT + "cpu:arm',",
+        "        '" + TestConstants.CONSTRAINTS_PACKAGE_ROOT + "os:android',",
+        "    ],",
+        ")");
+    config.append("WORKSPACE", "register_toolchains('//toolchains:all')");
   }
 
   protected void setupRulesCc(MockToolsConfig config) throws IOException {
@@ -259,6 +295,18 @@ public abstract class MockCcSupport {
         "package_group(",
         "    name = 'disabling_parse_headers_and_layering_check_allowed',",
         "    packages = ['//...']",
+        ")");
+  }
+
+  public static void createStarlarkLooseHeadersWhitelist(MockToolsConfig config, String... packages)
+      throws IOException {
+    String joinedPackages = Arrays.stream(packages).map(s -> "'" + s + "'").collect(joining(","));
+    config.overwrite(
+        TestConstants.TOOLS_REPOSITORY_SCRATCH
+            + "tools/build_defs/cc/whitelists/starlark_hdrs_check/BUILD",
+        "package_group(",
+        "    name = 'loose_header_check_allowed_in_toolchain',",
+        "    packages = [" + joinedPackages + "]",
         ")");
   }
 

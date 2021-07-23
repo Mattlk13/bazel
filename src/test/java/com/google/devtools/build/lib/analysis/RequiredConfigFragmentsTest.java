@@ -83,6 +83,26 @@ public final class RequiredConfigFragmentsTest extends BuildViewTestCase {
     assertThat(configSettingDirectFragments).contains("CppOptions");
   }
 
+  @Test
+  public void provideDirectHostOnlyRequiredFragmentsMode() throws Exception {
+    useConfiguration("--include_config_fragments_provider=direct_host_only");
+    scratch.file(
+        "a/BUILD",
+        "py_library(name = 'pylib', srcs = ['pylib.py'])",
+        "cc_library(name = 'cclib', srcs = ['cclb.cc'], data = [':pylib'])");
+
+    RequiredConfigFragmentsProvider targetConfigProvider =
+        getConfiguredTarget("//a:cclib").getProvider(RequiredConfigFragmentsProvider.class);
+    RequiredConfigFragmentsProvider hostConfigProvider =
+        getHostConfiguredTarget("//a:cclib").getProvider(RequiredConfigFragmentsProvider.class);
+
+    assertThat(targetConfigProvider).isNull();
+    assertThat(hostConfigProvider).isNotNull();
+    assertThat(hostConfigProvider.getRequiredConfigFragments()).contains("CppConfiguration");
+    assertThat(hostConfigProvider.getRequiredConfigFragments())
+        .doesNotContain("PythonConfiguration");
+  }
+
   /**
    * Helper method that returns a combined set of the common fragments all genrules require plus
    * instance-specific requirements passed here.
@@ -164,7 +184,7 @@ public final class RequiredConfigFragmentsTest extends BuildViewTestCase {
         RuleContext ruleContext,
         AspectParameters params,
         String toolsRepository)
-        throws ActionConflictException {
+        throws ActionConflictException, InterruptedException {
       ConfiguredAspect.Builder builder = new ConfiguredAspect.Builder(ruleContext);
       String customDefine = ruleContext.attributes().get("custom_define", Type.STRING);
       if (!customDefine.isEmpty()) {
@@ -195,13 +215,14 @@ public final class RequiredConfigFragmentsTest extends BuildViewTestCase {
     public Metadata getMetadata() {
       return RuleDefinition.Metadata.builder()
           .name("rule_that_attaches_aspect")
-          .ancestors(BaseRuleClasses.BaseRule.class)
+          .ancestors(BaseRuleClasses.NativeBuildRule.class)
           .factoryClass(RuleThatAttachesAspect.class)
           .build();
     }
 
     @Override
-    public ConfiguredTarget create(RuleContext ruleContext) throws ActionConflictException {
+    public ConfiguredTarget create(RuleContext ruleContext)
+        throws ActionConflictException, InterruptedException {
       return new RuleConfiguredTargetBuilder(ruleContext)
           .addProvider(RunfilesProvider.EMPTY)
           .build();
@@ -256,7 +277,7 @@ public final class RequiredConfigFragmentsTest extends BuildViewTestCase {
   }
 
   private void writeStarlarkTransitionsAndAllowList() throws Exception {
-    scratch.file(
+    scratch.overwriteFile(
         "tools/allowlists/function_transition_allowlist/BUILD",
         "package_group(",
         "    name = 'function_transition_allowlist',",

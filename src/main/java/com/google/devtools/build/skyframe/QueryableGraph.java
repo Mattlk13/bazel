@@ -14,6 +14,7 @@
 package com.google.devtools.build.skyframe;
 
 import com.google.common.base.Predicates;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.supplier.InterruptibleSupplier;
@@ -85,6 +86,10 @@ public interface QueryableGraph {
   /** Checks whether this graph stores reverse dependencies. */
   default boolean storesReverseDeps() {
     return true;
+  }
+
+  default ImmutableSet<SkyKey> getAllKeysForTesting() {
+    throw new UnsupportedOperationException();
   }
 
   /**
@@ -165,6 +170,18 @@ public interface QueryableGraph {
     /** The node is being looked up to service {@link WalkableGraph#getValueAndRdeps}. */
     WALKABLE_GRAPH_VALUE_AND_RDEPS,
 
+    /** The node is being looked up to service another "graph lookup" function. */
+    WALKABLE_GRAPH_OTHER,
+
+    /** Some other reason than one of the above that needs the node's value and deps. */
+    OTHER_NEEDING_VALUE_AND_DEPS,
+
+    /** Some other reason than one of the above that needs the node's reverse deps. */
+    OTHER_NEEDING_REVERSE_DEPS,
+
+    /** Some other reason than one of the above that needs the node's value and reverse deps. */
+    OTHER_NEEDING_VALUE_AND_REVERSE_DEPS,
+
     /** Some other reason than one of the above. */
     OTHER;
 
@@ -172,7 +189,8 @@ public interface QueryableGraph {
       return this == WALKABLE_GRAPH_VALUE
           || this == WALKABLE_GRAPH_DEPS
           || this == WALKABLE_GRAPH_RDEPS
-          || this == WALKABLE_GRAPH_VALUE_AND_RDEPS;
+          || this == WALKABLE_GRAPH_VALUE_AND_RDEPS
+          || this == WALKABLE_GRAPH_OTHER;
     }
   }
 

@@ -14,18 +14,25 @@
 
 package com.google.devtools.build.lib.packages;
 
+import static com.google.common.base.MoreObjects.firstNonNull;
+
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
-import com.google.devtools.build.lib.analysis.RuleDefinitionContext;
+import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
-import com.google.devtools.build.lib.syntax.EvalException;
-import com.google.devtools.build.lib.syntax.StarlarkThread;
+import java.util.HashMap;
 import javax.annotation.Nullable;
+import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.Starlark;
+import net.starlark.java.eval.StarlarkThread;
 
 /** Contextual information associated with each Starlark thread created by Bazel. */
 // TODO(adonovan): rename BazelThreadContext, for symmetry with BazelModuleContext.
-public final class BazelStarlarkContext implements RuleDefinitionContext, Label.HasRepoMapping {
+public final class BazelStarlarkContext
+    implements RuleDefinitionEnvironment,
+        Label.HasRepoMapping,
+        StarlarkThread.UncheckedExceptionContext {
 
   /** The phase to which this Starlark thread belongs. */
   public enum Phase {
@@ -43,21 +50,29 @@ public final class BazelStarlarkContext implements RuleDefinitionContext, Label.
   public void storeInThread(StarlarkThread thread) {
     thread.setThreadLocal(BazelStarlarkContext.class, this);
     thread.setThreadLocal(Label.HasRepoMapping.class, this);
+    thread.setUncheckedExceptionContext(this);
   }
 
   private final Phase phase;
-  private final String toolsRepository;
+  // Only necessary for loading phase threads.
+  @Nullable private final String toolsRepository;
+  // Only necessary for loading phase threads to construct configuration_field.
   @Nullable private final ImmutableMap<String, Class<?>> fragmentNameToClass;
   private final ImmutableMap<RepositoryName, RepositoryName> repoMapping;
+  private final HashMap<String, Label> convertedLabelsInPackage;
   private final SymbolGenerator<?> symbolGenerator;
   @Nullable private final Label analysisRuleLabel;
 
   /**
    * @param phase the phase to which this Starlark thread belongs
-   * @param toolsRepository the name of the tools repository, such as "@bazel_tools"
+   * @param toolsRepository the name of the tools repository, such as "@bazel_tools" for loading
+   *     phase threads, null for other threads.
    * @param fragmentNameToClass a map from configuration fragment name to configuration fragment
-   *     class, such as "apple" to AppleConfiguration.class
+   *     class, such as "apple" to AppleConfiguration.class for loading phase threads, null for
+   *     other threads.
    * @param repoMapping a map from RepositoryName to RepositoryName to be used for external
+   * @param convertedLabelsInPackage a mutable map from String to Label, used during package loading
+   *     of a single package.
    * @param symbolGenerator a {@link SymbolGenerator} to be used when creating objects to be
    *     compared using reference equality.
    * @param analysisRuleLabel is the label of the rule for an analysis phase (rule or aspect
@@ -73,25 +88,23 @@ public final class BazelStarlarkContext implements RuleDefinitionContext, Label.
   // analysis threads?
   public BazelStarlarkContext(
       Phase phase,
-      String toolsRepository,
+      @Nullable String toolsRepository,
       @Nullable ImmutableMap<String, Class<?>> fragmentNameToClass,
       ImmutableMap<RepositoryName, RepositoryName> repoMapping,
+      HashMap<String, Label> convertedLabelsInPackage,
       SymbolGenerator<?> symbolGenerator,
       @Nullable Label analysisRuleLabel) {
-    this.phase = phase;
+    this.phase = Preconditions.checkNotNull(phase);
     this.toolsRepository = toolsRepository;
     this.fragmentNameToClass = fragmentNameToClass;
     this.repoMapping = repoMapping;
+    this.convertedLabelsInPackage = convertedLabelsInPackage;
     this.symbolGenerator = Preconditions.checkNotNull(symbolGenerator);
     this.analysisRuleLabel = analysisRuleLabel;
   }
 
-  /** Returns the phase to which this Starlark thread belongs. */
-  public Phase getPhase() {
-    return phase;
-  }
-
   /** Returns the name of the tools repository, such as "@bazel_tools". */
+  @Nullable
   @Override
   public String getToolsRepository() {
     return toolsRepository;
@@ -112,6 +125,16 @@ public final class BazelStarlarkContext implements RuleDefinitionContext, Label.
     return repoMapping;
   }
 
+  /**
+   * Returns a String -> Label map of all the Strings that have already been converted to Labels
+   * during package loading of the current package.
+   *
+   * <p>This is used for a performance optimization during package loading, and unused otherwise.
+   */
+  public HashMap<String, Label> getConvertedLabelsInPackage() {
+    return convertedLabelsInPackage;
+  }
+
   public SymbolGenerator<?> getSymbolGenerator() {
     return symbolGenerator;
   }
@@ -125,6 +148,11 @@ public final class BazelStarlarkContext implements RuleDefinitionContext, Label.
     return analysisRuleLabel;
   }
 
+  @Override
+  public String getContextForUncheckedException() {
+    return firstNonNull(analysisRuleLabel, phase).toString();
+  }
+
   /**
    * Checks that the Starlark thread is in the loading or the workspace phase.
    *
@@ -132,8 +160,7 @@ public final class BazelStarlarkContext implements RuleDefinitionContext, Label.
    */
   public void checkLoadingOrWorkspacePhase(String function) throws EvalException {
     if (phase == Phase.ANALYSIS) {
-      throw new EvalException(
-          null, "'" + function + "' cannot be called during the analysis phase");
+      throw Starlark.errorf("'%s' cannot be called during the analysis phase", function);
     }
   }
 
@@ -144,8 +171,18 @@ public final class BazelStarlarkContext implements RuleDefinitionContext, Label.
    */
   public void checkLoadingPhase(String function) throws EvalException {
     if (phase != Phase.LOADING) {
-      throw new EvalException(
-          null, "'" + function + "' can only be called during the loading phase");
+      throw Starlark.errorf("'%s' can only be called during the loading phase", function);
+    }
+  }
+
+  /**
+   * Checks that the current StarlarkThread is in the workspace phase.
+   *
+   * @param function name of a function that requires this check
+   */
+  public void checkWorkspacePhase(String function) throws EvalException {
+    if (phase != Phase.WORKSPACE) {
+      throw Starlark.errorf("'%s' can only be called during workspace loading", function);
     }
   }
 }

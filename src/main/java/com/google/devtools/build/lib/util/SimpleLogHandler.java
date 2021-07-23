@@ -26,6 +26,7 @@ import com.google.common.net.InetAddresses;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.io.OutputStreamWriter;
 import java.lang.management.ManagementFactory;
 import java.nio.file.DirectoryStream;
@@ -413,6 +414,8 @@ public final class SimpleLogHandler extends Handler {
       return;
     }
 
+    // This allows us to do the I/O while not forgetting that we were interrupted.
+    boolean isInterrupted = Thread.interrupted();
     try {
       String message = getFormatter().format(record);
       openOutputIfNeeded();
@@ -421,6 +424,9 @@ public final class SimpleLogHandler extends Handler {
       reportError(null, e, ErrorManager.WRITE_FAILURE);
       // Failing to log is non-fatal. Continue to try to rotate the log if necessary, which may fix
       // the underlying IO problem with the file.
+      if (e instanceof InterruptedIOException) {
+        isInterrupted = true;
+      }
     }
 
     try {
@@ -430,34 +436,57 @@ public final class SimpleLogHandler extends Handler {
       }
     } catch (IOException e) {
       reportError("Failed to rotate log file", e, ErrorManager.GENERIC_FAILURE);
+      if (e instanceof InterruptedIOException) {
+        isInterrupted = true;
+      }
+    }
+    if (isInterrupted) {
+      Thread.currentThread().interrupt();
     }
   }
 
   @Override
   public synchronized void flush() {
+    boolean isInterrupted = Thread.interrupted();
     if (output.isOpen()) {
       try {
         output.flush();
       } catch (IOException e) {
         reportError(null, e, ErrorManager.FLUSH_FAILURE);
+        if (e instanceof InterruptedIOException) {
+          isInterrupted = true;
+        }
       }
+    }
+    if (isInterrupted) {
+      Thread.currentThread().interrupt();
     }
   }
 
   @Override
   public synchronized void close() {
+    boolean isInterrupted = Thread.interrupted();
     if (output.isOpen()) {
       try {
         output.write(getFormatter().getTail(this));
       } catch (IOException e) {
         reportError("Failed to write log tail", e, ErrorManager.WRITE_FAILURE);
+        if (e instanceof InterruptedIOException) {
+          isInterrupted = true;
+        }
       }
 
       try {
         output.close();
       } catch (IOException e) {
         reportError(null, e, ErrorManager.CLOSE_FAILURE);
+        if (e instanceof InterruptedIOException) {
+          isInterrupted = true;
+        }
       }
+    }
+    if (isInterrupted) {
+      Thread.currentThread().interrupt();
     }
   }
 
@@ -473,7 +502,8 @@ public final class SimpleLogHandler extends Handler {
    *     configured in the JVM logging configuration
    * @param <T> value type
    */
-  private static @Nullable <T> T getConfiguredProperty(
+  @Nullable
+  private static <T> T getConfiguredProperty(
       @Nullable T builderValue,
       String configuredName,
       Function<String, T> parse,
@@ -690,11 +720,11 @@ public final class SimpleLogHandler extends Handler {
 
   private static final class Output {
     /** Log file currently in use. */
-    private @Nullable File file;
+    @Nullable private File file;
     /** Output stream for {@link #file} which counts the number of bytes written. */
-    private @Nullable CountingOutputStream stream;
+    @Nullable private CountingOutputStream stream;
     /** Writer for {@link #stream}. */
-    private @Nullable OutputStreamWriter writer;
+    @Nullable private OutputStreamWriter writer;
 
     public boolean isOpen() {
       return writer != null;

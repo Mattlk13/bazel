@@ -22,6 +22,7 @@ import static org.junit.Assert.assertThrows;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
+import com.google.devtools.build.lib.actions.ArtifactRoot.RootType;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
@@ -75,7 +76,7 @@ public class ArtifactFactoryTest {
     clientRoot = Root.fromPath(scratch.dir("/client/workspace"));
     clientRoRoot = Root.fromPath(scratch.dir("/client/RO/workspace"));
     alienRoot = Root.fromPath(scratch.dir("/client/workspace"));
-    outRoot = ArtifactRoot.asDerivedRoot(execRoot, "out-root", "x", "bin");
+    outRoot = ArtifactRoot.asDerivedRoot(execRoot, RootType.Output, "out-root", "x", "bin");
 
     fooPath = PathFragment.create("foo");
     fooPackage = PackageIdentifier.createInMainRepo(fooPath);
@@ -99,15 +100,6 @@ public class ArtifactFactoryTest {
     packageRootMap.put(barPackage, clientRoRoot);
     packageRootMap.put(alienPackage, alienRoot);
     artifactFactory.setPackageRoots(packageRootMap::get);
-    Root absoluteRoot = Root.absoluteRoot(clientRoot.asPath().getFileSystem());
-    artifactFactory.setSourceArtifactRoots(
-        ImmutableMap.of(
-            clientRoot,
-            ArtifactRoot.asSourceRoot(clientRoot),
-            clientRoRoot,
-            ArtifactRoot.asSourceRoot(clientRoRoot),
-            absoluteRoot,
-            ArtifactRoot.asSourceRoot(absoluteRoot)));
   }
 
   @Test
@@ -228,8 +220,7 @@ public class ArtifactFactoryTest {
         artifactFactory.getDerivedArtifact(barRelative, outRoot, NULL_ARTIFACT_OWNER);
     a.setGeneratingActionKey(ActionsTestUtil.NULL_ACTION_LOOKUP_DATA);
     b.setGeneratingActionKey(ActionsTestUtil.NULL_ACTION_LOOKUP_DATA);
-    MutableActionGraph actionGraph =
-        new MapBasedActionGraph(/*eventHandler=*/ ignored -> {}, actionKeyContext);
+    MutableActionGraph actionGraph = new MapBasedActionGraph(actionKeyContext);
     Action originalAction = new ActionsTestUtil.NullAction(NULL_ACTION_OWNER, a);
     actionGraph.registerAction(originalAction);
 

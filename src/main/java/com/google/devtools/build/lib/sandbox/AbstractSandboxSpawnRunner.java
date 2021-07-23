@@ -21,6 +21,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.ActionExecutionMetadata;
 import com.google.devtools.build.lib.actions.ExecException;
+import com.google.devtools.build.lib.actions.ForbiddenActionInputException;
 import com.google.devtools.build.lib.actions.ResourceManager;
 import com.google.devtools.build.lib.actions.ResourceManager.ResourceHandle;
 import com.google.devtools.build.lib.actions.Spawn;
@@ -30,7 +31,9 @@ import com.google.devtools.build.lib.actions.Spawns;
 import com.google.devtools.build.lib.actions.UserExecException;
 import com.google.devtools.build.lib.exec.BinTools;
 import com.google.devtools.build.lib.exec.ExecutionOptions;
+import com.google.devtools.build.lib.exec.SpawnExecutingEvent;
 import com.google.devtools.build.lib.exec.SpawnRunner;
+import com.google.devtools.build.lib.exec.SpawnSchedulingEvent;
 import com.google.devtools.build.lib.exec.TreeDeleter;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.profiler.SilentCloseable;
@@ -78,18 +81,23 @@ abstract class AbstractSandboxSpawnRunner implements SpawnRunner {
 
   @Override
   public final SpawnResult exec(Spawn spawn, SpawnExecutionContext context)
-      throws ExecException, IOException, InterruptedException {
+      throws ExecException, InterruptedException {
     ActionExecutionMetadata owner = spawn.getResourceOwner();
-    context.report(ProgressStatus.SCHEDULING, getName());
+    context.report(SpawnSchedulingEvent.create(getName()));
     try (ResourceHandle ignored =
         resourceManager.acquireResources(owner, spawn.getLocalResources())) {
-      context.report(ProgressStatus.EXECUTING, getName());
+      context.report(SpawnExecutingEvent.create(getName()));
       SandboxedSpawn sandbox = prepareSpawn(spawn, context);
       return runSpawn(spawn, sandbox, context);
     } catch (IOException e) {
       FailureDetail failureDetail =
           createFailureDetail(
               "I/O exception during sandboxed execution", Code.EXECUTION_IO_EXCEPTION);
+      throw new UserExecException(e, failureDetail);
+    } catch (ForbiddenActionInputException e) {
+      FailureDetail failureDetail =
+          createFailureDetail(
+              "Forbidden input found during sandboxed execution", Code.FORBIDDEN_INPUT);
       throw new UserExecException(e, failureDetail);
     }
   }
@@ -105,11 +113,11 @@ abstract class AbstractSandboxSpawnRunner implements SpawnRunner {
   }
 
   protected abstract SandboxedSpawn prepareSpawn(Spawn spawn, SpawnExecutionContext context)
-      throws IOException, ExecException;
+      throws IOException, ExecException, InterruptedException, ForbiddenActionInputException;
 
   private SpawnResult runSpawn(
       Spawn originalSpawn, SandboxedSpawn sandbox, SpawnExecutionContext context)
-      throws IOException, InterruptedException {
+      throws IOException, ForbiddenActionInputException, InterruptedException {
     try {
       try (SilentCloseable c = Profiler.instance().profile("sandbox.createFileSystem")) {
         sandbox.createFileSystem();
@@ -182,7 +190,7 @@ abstract class AbstractSandboxSpawnRunner implements SpawnRunner {
         subprocess.waitFor();
         terminationStatus = new TerminationStatus(subprocess.exitValue(), subprocess.timedout());
       } catch (InterruptedException e) {
-        subprocess.destroy();
+        subprocess.destroyAndWait();
         throw e;
       }
     } catch (IOException e) {
@@ -197,7 +205,7 @@ abstract class AbstractSandboxSpawnRunner implements SpawnRunner {
           .setStatus(Status.EXECUTION_FAILED)
           .setExitCode(LOCAL_EXEC_ERROR)
           .setFailureMessage(message)
-          .setFailureDetail(createFailureDetail(message, Code.EXECUTION_FAILED))
+          .setFailureDetail(createFailureDetail(message, Code.SUBPROCESS_START_FAILED))
           .build();
     }
 
@@ -266,6 +274,14 @@ abstract class AbstractSandboxSpawnRunner implements SpawnRunner {
                     resourceUsage.getBlockInputOperations());
                 spawnResultBuilder.setNumInvoluntaryContextSwitches(
                     resourceUsage.getInvoluntaryContextSwitches());
+                // The memory usage of the largest child process. For Darwin maxrss returns size in
+                // bytes.
+                if (OS.getCurrent() == OS.DARWIN) {
+                  spawnResultBuilder.setMemoryInKb(
+                      resourceUsage.getMaximumResidentSetSize() / 1000);
+                } else {
+                  spawnResultBuilder.setMemoryInKb(resourceUsage.getMaximumResidentSetSize());
+                }
               });
     }
 

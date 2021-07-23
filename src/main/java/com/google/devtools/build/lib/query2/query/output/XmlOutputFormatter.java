@@ -16,6 +16,7 @@ package com.google.devtools.build.lib.query2.query.output;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
+import com.google.common.hash.HashFunction;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.BuildType;
@@ -36,7 +37,6 @@ import com.google.devtools.build.lib.query2.engine.QueryEnvironment;
 import com.google.devtools.build.lib.query2.engine.SynchronizedDelegatingOutputFormatterCallback;
 import com.google.devtools.build.lib.query2.engine.ThreadSafeOutputFormatterCallback;
 import com.google.devtools.build.lib.query2.query.aspectresolvers.AspectResolver;
-import java.io.IOException;
 import java.io.OutputStream;
 import java.util.Collection;
 import java.util.HashSet;
@@ -63,6 +63,7 @@ class XmlOutputFormatter extends AbstractUnorderedFormatter {
   private AspectResolver aspectResolver;
   private DependencyFilter dependencyFilter;
   private boolean relativeLocations;
+  private boolean displaySourceFileLocation;
   private QueryOptions queryOptions;
 
   @Override
@@ -78,11 +79,13 @@ class XmlOutputFormatter extends AbstractUnorderedFormatter {
   }
 
   @Override
-  public void setOptions(CommonQueryOptions options, AspectResolver aspectResolver) {
-    super.setOptions(options, aspectResolver);
+  public void setOptions(
+      CommonQueryOptions options, AspectResolver aspectResolver, HashFunction hashFunction) {
+    super.setOptions(options, aspectResolver, hashFunction);
     this.aspectResolver = aspectResolver;
     this.dependencyFilter = FormatUtils.getDependencyFilter(options);
     this.relativeLocations = options.relativeLocations;
+    this.displaySourceFileLocation = options.displaySourceFileLocation;
 
     Preconditions.checkArgument(options instanceof QueryOptions);
     this.queryOptions = (QueryOptions) options;
@@ -90,7 +93,7 @@ class XmlOutputFormatter extends AbstractUnorderedFormatter {
 
   @Override
   public OutputFormatterCallback<Target> createPostFactoStreamCallback(
-      final OutputStream out, final QueryOptions options) {
+      OutputStream out, QueryOptions options) {
     return new OutputFormatterCallback<Target>() {
 
       private Document doc;
@@ -112,15 +115,14 @@ class XmlOutputFormatter extends AbstractUnorderedFormatter {
       }
 
       @Override
-      public void processOutput(Iterable<Target> partialResult)
-          throws IOException, InterruptedException {
+      public void processOutput(Iterable<Target> partialResult) throws InterruptedException {
         for (Target target : partialResult) {
           queryElem.appendChild(createTargetElement(doc, target));
         }
       }
 
       @Override
-      public void close(boolean failFast) throws IOException {
+      public void close(boolean failFast) {
         if (!failFast) {
           try {
             Transformer transformer = TransformerFactory.newInstance().newTransformer();
@@ -145,7 +147,6 @@ class XmlOutputFormatter extends AbstractUnorderedFormatter {
    * - 'name' attribute is target's label.
    * - 'location' attribute is consistent with output of --output location.
    * - rule attributes are represented in the DOM structure.
-   * @throws InterruptedException
    */
   private Element createTargetElement(Document doc, Target target)
       throws InterruptedException {
@@ -155,8 +156,15 @@ class XmlOutputFormatter extends AbstractUnorderedFormatter {
       elem = doc.createElement("rule");
       elem.setAttribute("class", rule.getRuleClass());
       for (Attribute attr : rule.getAttributes()) {
-        PossibleAttributeValues values = PossibleAttributeValues.forRuleAndAttribute(rule, attr);
-        if (values.getSource() == AttributeValueSource.RULE || queryOptions.xmlShowDefaultValues) {
+        AttributeValueSource attributeValueSource =
+            AttributeValueSource.forRuleAndAttribute(rule, attr);
+        if (attributeValueSource == AttributeValueSource.RULE
+            || queryOptions.xmlShowDefaultValues) {
+          // TODO(b/162524370): mayTreatMultipleAsNone should be true for types that drop multiple
+          //  values.
+          Iterable<Object> values =
+              PossibleAttributeValues.forRuleAndAttribute(
+                  rule, attr, /*mayTreatMultipleAsNone=*/ false);
           Element attrElem = createValueElement(doc, attr.getType(), values);
           attrElem.setAttribute("name", attr.getName());
           elem.appendChild(attrElem);
@@ -167,7 +175,7 @@ class XmlOutputFormatter extends AbstractUnorderedFormatter {
       // this goes beyond what is available from the attributes above, since it
       // may also (depending on options) include implicit outputs,
       // host-configuration outputs, and default values.
-      for (Label label : rule.getLabels(dependencyFilter)) {
+      for (Label label : rule.getSortedLabels(dependencyFilter)) {
         Element inputElem = doc.createElement("rule-input");
         inputElem.setAttribute("name", label.toString());
         elem.appendChild(inputElem);
@@ -178,7 +186,7 @@ class XmlOutputFormatter extends AbstractUnorderedFormatter {
         inputElem.setAttribute("name", label.toString());
         elem.appendChild(inputElem);
       }
-      for (OutputFile outputFile: rule.getOutputFiles()) {
+      for (OutputFile outputFile : rule.getOutputFiles()) {
         Element outputElem = doc.createElement("rule-output");
         outputElem.setAttribute("name", outputFile.getLabel().toString());
         elem.appendChild(outputElem);
@@ -238,7 +246,7 @@ class XmlOutputFormatter extends AbstractUnorderedFormatter {
     }
 
     elem.setAttribute("name", target.getLabel().toString());
-    String location = FormatUtils.getLocation(target, relativeLocations);
+    String location = FormatUtils.getLocation(target, relativeLocations, displaySourceFileLocation);
     if (!queryOptions.xmlLineNumbers) {
       int firstColon = location.indexOf(':');
       if (firstColon != -1) {
@@ -250,7 +258,7 @@ class XmlOutputFormatter extends AbstractUnorderedFormatter {
     return elem;
   }
 
-  private void addPackageGroupsToElement(Document doc, Element parent, Target target) {
+  private static void addPackageGroupsToElement(Document doc, Element parent, Target target) {
     for (Label visibilityDependency : target.getVisibility().getDependencyLabels()) {
       Element elem = doc.createElement("package-group");
       elem.setAttribute("name", visibilityDependency.toString());
@@ -264,7 +272,7 @@ class XmlOutputFormatter extends AbstractUnorderedFormatter {
     }
   }
 
-  private void addFeaturesToElement(Document doc, Element parent, InputFile inputFile) {
+  private static void addFeaturesToElement(Document doc, Element parent, InputFile inputFile) {
     for (String feature : inputFile.getPackage().getFeatures()) {
       Element elem = doc.createElement("feature");
       elem.setAttribute("name", feature);

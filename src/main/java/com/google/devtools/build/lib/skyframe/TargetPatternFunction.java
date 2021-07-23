@@ -22,6 +22,7 @@ import com.google.devtools.build.lib.cmdline.TargetParsingException;
 import com.google.devtools.build.lib.cmdline.TargetPattern;
 import com.google.devtools.build.lib.concurrent.BatchCallback;
 import com.google.devtools.build.lib.concurrent.MultisetSemaphore;
+import com.google.devtools.build.lib.packages.OutputFile;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.pkgcache.AbstractRecursivePackageProvider.MissingDepException;
 import com.google.devtools.build.lib.pkgcache.ParsingFailedEvent;
@@ -65,7 +66,8 @@ public class TargetPatternFunction implements SkyFunction {
               provider,
               env.getListener(),
               patternKey.getPolicy(),
-              MultisetSemaphore.<PackageIdentifier>unbounded());
+              MultisetSemaphore.<PackageIdentifier>unbounded(),
+              SimplePackageIdentifierBatchingCallback::new);
       ImmutableSet<PathFragment> excludedSubdirectories = patternKey.getExcludedSubdirectories();
       ResolvedTargets.Builder<Target> resolvedTargetsBuilder = ResolvedTargets.builder();
       BatchCallback<Target, RuntimeException> callback =
@@ -73,13 +75,26 @@ public class TargetPatternFunction implements SkyFunction {
             @Override
             public void process(Iterable<Target> partialResult) {
               for (Target target : partialResult) {
+                // TODO(b/156899726): This will go away as soon as we remove implicit outputs from
+                // cc_library completely. The only
+                // downside to doing this is that implicit outputs won't be listed when doing
+                // somepackage:* for the handful of cases still on the allowlist. This is only a
+                // google internal problem and the scale of it is acceptable in the short term
+                // while cleaning up the allowlist.
+                if (target instanceof OutputFile
+                    && ((OutputFile) target)
+                        .getGeneratingRule()
+                        .getRuleClass()
+                        .equals("cc_library")) {
+                  continue;
+                }
                 resolvedTargetsBuilder.add(target);
               }
             }
           };
       parsedPattern.eval(
           resolver,
-          ignoredPatterns,
+          () -> ignoredPatterns,
           excludedSubdirectories,
           callback,
           // The exception type here has to match the one on the BatchCallback. Since the callback

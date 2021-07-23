@@ -22,28 +22,28 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
 import com.google.common.collect.Sets.SetView;
 import com.google.common.flogger.GoogleLogger;
-import com.google.devtools.build.lib.actions.InconsistentFilesystemException;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.cmdline.TargetPattern;
+import com.google.devtools.build.lib.cmdline.TargetPattern.TargetsBelowDirectory;
 import com.google.devtools.build.lib.concurrent.BatchCallback;
 import com.google.devtools.build.lib.concurrent.ParallelVisitor.UnusedException;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.ExtendedEventHandler;
+import com.google.devtools.build.lib.io.InconsistentFilesystemException;
 import com.google.devtools.build.lib.packages.BuildFileNotFoundException;
 import com.google.devtools.build.lib.packages.NoSuchPackageException;
 import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.lib.pkgcache.AbstractRecursivePackageProvider;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
+import com.google.devtools.build.lib.query2.engine.QueryException;
 import com.google.devtools.build.lib.rules.repository.RepositoryDirectoryValue;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 import com.google.devtools.build.skyframe.WalkableGraph;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -55,16 +55,57 @@ import java.util.Set;
 @ThreadSafe
 public final class GraphBackedRecursivePackageProvider extends AbstractRecursivePackageProvider {
 
+  /**
+   * Helper interface for clients of GraphBackedRecursivePackageProvider to indicate what universe
+   * packages should be resolved in.
+   *
+   * <p>Client can either specify a fixed set of target patterns (using {@link #of()}), or specify
+   * that all targets are valid (using {@link #all()}).
+   */
+  public interface UniverseTargetPattern {
+    ImmutableList<TargetPattern> patterns();
+
+    boolean allowAll();
+
+    static UniverseTargetPattern of(ImmutableList<TargetPattern> patterns) {
+      return new UniverseTargetPattern() {
+        @Override
+        public ImmutableList<TargetPattern> patterns() {
+          return patterns;
+        }
+
+        @Override
+        public boolean allowAll() {
+          return false;
+        }
+      };
+    }
+
+    static UniverseTargetPattern all() {
+      return new UniverseTargetPattern() {
+        @Override
+        public ImmutableList<TargetPattern> patterns() {
+          return ImmutableList.of();
+        }
+
+        @Override
+        public boolean allowAll() {
+          return true;
+        }
+      };
+    }
+  }
+
   private final WalkableGraph graph;
   private final ImmutableList<Root> pkgRoots;
   private final RootPackageExtractor rootPackageExtractor;
-  private final ImmutableList<TargetPattern> universeTargetPatterns;
+  private final UniverseTargetPattern universeTargetPatterns;
 
   private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
 
   public GraphBackedRecursivePackageProvider(
       WalkableGraph graph,
-      ImmutableList<TargetPattern> universeTargetPatterns,
+      UniverseTargetPattern universeTargetPatterns,
       PathPackageLocator pkgPath,
       RootPackageExtractor rootPackageExtractor) {
     this.graph = Preconditions.checkNotNull(graph);
@@ -158,24 +199,24 @@ public final class GraphBackedRecursivePackageProvider extends AbstractRecursive
     return packageLookupValue.packageExists();
   }
 
-  private List<Root> checkValidDirectoryAndGetRoots(
-      RepositoryName repository,
-      PathFragment directory,
-      ImmutableSet<PathFragment> ignoredSubdirectories,
-      ImmutableSet<PathFragment> excludedSubdirectories)
-      throws InterruptedException {
-    if (ignoredSubdirectories.contains(directory) || excludedSubdirectories.contains(directory)) {
-      return ImmutableList.of();
-    }
+  private ImmutableList<Root> checkValidDirectoryAndGetRoots(
+      RepositoryName repository, PathFragment directory) throws InterruptedException {
 
     // Check that this package is covered by at least one of our universe patterns.
     boolean inUniverse = false;
-    for (TargetPattern pattern : universeTargetPatterns) {
-      boolean isTBD = pattern.getType().equals(TargetPattern.Type.TARGETS_BELOW_DIRECTORY);
-      PackageIdentifier packageIdentifier = PackageIdentifier.create(repository, directory);
-      if (isTBD && pattern.containsAllTransitiveSubdirectoriesForTBD(packageIdentifier)) {
-        inUniverse = true;
-        break;
+    if (universeTargetPatterns.allowAll()) {
+      inUniverse = true;
+    } else {
+      for (TargetPattern pattern : universeTargetPatterns.patterns()) {
+        if (!pattern.getType().equals(TargetPattern.Type.TARGETS_BELOW_DIRECTORY)) {
+          continue;
+        }
+        PackageIdentifier packageIdentifier = PackageIdentifier.create(repository, directory);
+        if (((TargetsBelowDirectory) pattern)
+            .containsAllTransitiveSubdirectories(packageIdentifier)) {
+          inUniverse = true;
+          break;
+        }
       }
     }
 
@@ -183,9 +224,8 @@ public final class GraphBackedRecursivePackageProvider extends AbstractRecursive
       return ImmutableList.of();
     }
 
-    List<Root> roots = new ArrayList<>();
     if (repository.isMain()) {
-      roots.addAll(pkgRoots);
+      return pkgRoots;
     } else {
       RepositoryDirectoryValue repositoryValue =
           (RepositoryDirectoryValue) graph.getValue(RepositoryDirectoryValue.key(repository));
@@ -194,9 +234,8 @@ public final class GraphBackedRecursivePackageProvider extends AbstractRecursive
         // "nothing".
         return ImmutableList.of();
       }
-      roots.add(Root.fromPath(repositoryValue.getPath()));
+      return ImmutableList.of(Root.fromPath(repositoryValue.getPath()));
     }
-    return roots;
   }
 
   @Override
@@ -207,10 +246,8 @@ public final class GraphBackedRecursivePackageProvider extends AbstractRecursive
       PathFragment directory,
       ImmutableSet<PathFragment> ignoredSubdirectories,
       ImmutableSet<PathFragment> excludedSubdirectories)
-      throws InterruptedException {
-    List<Root> roots =
-        checkValidDirectoryAndGetRoots(
-            repository, directory, ignoredSubdirectories, excludedSubdirectories);
+      throws InterruptedException, QueryException {
+    ImmutableList<Root> roots = checkValidDirectoryAndGetRoots(repository, directory);
 
     rootPackageExtractor.streamPackagesFromRoots(
         results,

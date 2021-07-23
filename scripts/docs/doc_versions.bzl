@@ -15,13 +15,41 @@
 # To get the checksum of the versioned documentation tree tarball, run the
 # following command with the selected Bazel version:
 #
-# $ curl -s https://mirror.bazel.build/bazel_versioned_docs/jekyll-tree-0.20.0.tar | sha256sum | cut -d" " -f1
+# $ curl -fs https://mirror.bazel.build/bazel_versioned_docs/jekyll-tree-0.20.0.tar | sha256sum | cut -d" " -f1
 # bb79a63810bf1b0aa1f89bd3bbbeb4a547a30ab9af70c9be656cc6866f4b015b
 #
 # This list must be kept in sync with `doc_versions` variable in //site:_config.yml
 """This module contains the versions and hashes of Bazel's documentation tarballs."""
 
 DOC_VERSIONS = [
+    {
+        "version": "4.1.0",
+        "sha256": "9ed45a322906029d161f5514371841fbec214c63b9517fccb225c8670ebb482a",
+    },
+    {
+        "version": "4.0.0",
+        "sha256": "9d8e350a17b85624d8d78291d440e05f6ba8af493c1ccb846d0493579dade1b6",
+    },
+    {
+        "version": "3.7.0",
+        "sha256": "a534d37ef3867c92fae8692852f92820a34f63a5f9092bbbec6505c0f69d8094",
+    },
+    {
+        "version": "3.6.0",
+        "sha256": "1b7a16a2098ca0c290c208a11db886e950d6c523b2cac2d0a0cba4a04aa832f3",
+    },
+    {
+        "version": "3.5.1",
+        "sha256": "1c949ba8da353c93c74a70638e5cb321ea1cd5582eda1b6ad88c6d2d0b569f2f",
+    },
+    {
+        "version": "3.5.0",
+        "sha256": "aa96cbad14cfab0b422d1d17eac3107a75eb05854d40ab4f1379a6fc87b2e1f8",
+    },
+    {
+        "version": "3.4.0",
+        "sha256": "af82e775d911135bcff76e500bb003c4a9fccb949f8ddf4d93c58eca195bf5e8",
+    },
     {
         "version": "3.3.0",
         "sha256": "36b81e8ddf4f3caccf41acc82d9e49f000c1be9e92c9cc82793d60ff70636176",

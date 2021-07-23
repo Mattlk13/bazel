@@ -15,13 +15,17 @@
 package com.google.devtools.build.lib.bazel.rules.android;
 
 import static com.google.common.truth.Truth.assertThat;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.fail;
 
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.FilesToRunProvider;
-import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
+import com.google.devtools.build.lib.bazel.rules.android.AndroidSdkRepositoryFunction.AndroidRevision;
+import com.google.devtools.build.lib.bazel.rules.android.AndroidSdkRepositoryTest.WithPlatforms;
+import com.google.devtools.build.lib.bazel.rules.android.AndroidSdkRepositoryTest.WithoutPlatforms;
 import com.google.devtools.build.lib.packages.RepositoryFetchException;
 import com.google.devtools.build.lib.packages.util.ResourceLoader;
+import com.google.devtools.build.lib.rules.android.AndroidBuildViewTestCase;
 import com.google.devtools.build.lib.rules.android.AndroidSdkProvider;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetAndData;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
@@ -29,10 +33,26 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
+import org.junit.runners.Suite;
+import org.junit.runners.Suite.SuiteClasses;
 
 /** Tests for {@link AndroidSdkRepositoryFunction}. */
-@RunWith(JUnit4.class)
-public class AndroidSdkRepositoryTest extends BuildViewTestCase {
+@RunWith(Suite.class)
+@SuiteClasses({WithoutPlatforms.class, WithPlatforms.class})
+public abstract class AndroidSdkRepositoryTest extends AndroidBuildViewTestCase {
+  /** Use legacy toolchain resolution. */
+  @RunWith(JUnit4.class)
+  public static class WithoutPlatforms extends AndroidSdkRepositoryTest {}
+
+  /** Use platform-based toolchain resolution. */
+  @RunWith(JUnit4.class)
+  public static class WithPlatforms extends AndroidSdkRepositoryTest {
+    @Override
+    protected boolean platformBasedToolchains() {
+      return true;
+    }
+  }
+
   @Before
   public void setup() throws Exception {
     scratch.file(
@@ -56,6 +76,11 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
   }
 
   private void scratchBuildToolsDirectories(String... versions) throws Exception {
+    if (versions.length == 0) {
+      // Use a large version number here so that we don't have to update this test as
+      // AndroidSdkRepositoryFunction.MIN_BUILD_TOOLS_REVISION increases.
+      versions = new String[] {"400.0.0"};
+    }
     for (String version : versions) {
       scratch.dir("/sdk/build-tools/" + version);
     }
@@ -83,7 +108,7 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
   @Test
   public void testGeneratedAarImport() throws Exception {
     scratchPlatformsDirectories(25);
-    scratchBuildToolsDirectories("26.0.1");
+    scratchBuildToolsDirectories();
     scratchExtrasLibrary("extras/google/m2repository", "com.google.android", "foo", "1.0.0", "aar");
     String bazelToolsWorkspace = scratch.dir("bazel_tools_workspace").getPathString();
     FileSystemUtils.appendIsoLatin1(
@@ -105,7 +130,7 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
   @Test
   public void testExportsExtrasLibraryArtifacts() throws Exception {
     scratchPlatformsDirectories(25);
-    scratchBuildToolsDirectories("26.0.1");
+    scratchBuildToolsDirectories();
     scratchExtrasLibrary("extras/google/m2repository", "com.google.android", "foo", "1.0.0", "aar");
     String bazelToolsWorkspace = scratch.dir("bazel_tools_workspace").getPathString();
     FileSystemUtils.appendIsoLatin1(
@@ -125,7 +150,7 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
   @Test
   public void testKnownSdkMavenRepositories() throws Exception {
     scratchPlatformsDirectories(25);
-    scratchBuildToolsDirectories("26.0.1");
+    scratchBuildToolsDirectories();
     scratchExtrasLibrary("extras/google/m2repository", "com.google.android", "a", "1.0.0", "jar");
     scratchExtrasLibrary("extras/android/m2repository", "com.android.support", "b", "1.0.0", "aar");
     scratchExtrasLibrary("extras/m2repository", "com.android.support", "c", "1.0.1", "aar");
@@ -156,7 +181,7 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
   @Test
   public void testSystemImageDirectoriesAreFound() throws Exception {
     scratchPlatformsDirectories(25);
-    scratchBuildToolsDirectories("26.0.1");
+    scratchBuildToolsDirectories();
     String bazelToolsWorkspace = scratch.dir("bazel_tools_workspace").getPathString();
     FileSystemUtils.appendIsoLatin1(
         scratch.resolve("WORKSPACE"),
@@ -172,8 +197,8 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
         getConfiguredTarget("@androidsdk//:emulator_images_android_25_arm");
     assertThat(android25ArmFilegroup).isNotNull();
     assertThat(
-        artifactsToStrings(
-            android25ArmFilegroup.getProvider(FilesToRunProvider.class).getFilesToRun()))
+            artifactsToStrings(
+                android25ArmFilegroup.getProvider(FilesToRunProvider.class).getFilesToRun()))
         .containsExactly(
             "src external/androidsdk/system-images/android-25/default/armeabi-v7a/system.img");
 
@@ -181,8 +206,8 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
         getConfiguredTarget("@androidsdk//:emulator_images_google_24_x86");
     assertThat(android24X86Filegroup).isNotNull();
     assertThat(
-        artifactsToStrings(
-            android24X86Filegroup.getProvider(FilesToRunProvider.class).getFilesToRun()))
+            artifactsToStrings(
+                android24X86Filegroup.getProvider(FilesToRunProvider.class).getFilesToRun()))
         .containsExactly(
             "src external/androidsdk/system-images/android-24/google_apis/x86/system.img");
   }
@@ -191,7 +216,7 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
   @Test
   public void testMalformedSystemImageDirectories() throws Exception {
     scratchPlatformsDirectories(25, 26);
-    scratchBuildToolsDirectories("26.0.1");
+    scratchBuildToolsDirectories();
     scratchSystemImagesDirectories("android-25/default/armeabi-v7a", "android-O/google_apis/x86");
     String bazelToolsWorkspace = scratch.dir("bazel_tools_workspace").getPathString();
     FileSystemUtils.appendIsoLatin1(
@@ -206,9 +231,34 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
   }
 
   @Test
+  public void testBuildToolsVersion() throws Exception {
+    scratchPlatformsDirectories(25);
+    // Use large version numbers here so that we don't have to update this test as
+    // AndroidSdkRepositoryFunction.MIN_BUILD_TOOLS_REVISION increases.
+    scratchBuildToolsDirectories("400.0.1", "400.0.2", "400.0.3");
+    String bazelToolsWorkspace = scratch.dir("bazel_tools_workspace").getPathString();
+    FileSystemUtils.appendIsoLatin1(
+        scratch.resolve("WORKSPACE"),
+        "local_repository(name = 'bazel_tools', path = '" + bazelToolsWorkspace + "')",
+        "android_sdk_repository(",
+        "    name = 'androidsdk',",
+        "    path = '/sdk',",
+        "    build_tools_version = '400.0.2',",
+        ")");
+    invalidatePackages();
+
+    ConfiguredTarget androidSdk = getConfiguredTarget("@androidsdk//:sdk");
+    assertThat(androidSdk).isNotNull();
+    assertThat(androidSdk.get(AndroidSdkProvider.PROVIDER).getBuildToolsVersion())
+        .isEqualTo("400.0.2");
+  }
+
+  @Test
   public void testBuildToolsHighestVersionDetection() throws Exception {
     scratchPlatformsDirectories(25);
-    scratchBuildToolsDirectories("26.0.1", "26.0.2");
+    // Use large version numbers here so that we don't have to update this test as
+    // AndroidSdkRepositoryFunction.MIN_BUILD_TOOLS_REVISION increases.
+    scratchBuildToolsDirectories("400.0.1", "400.0.2");
     String bazelToolsWorkspace = scratch.dir("bazel_tools_workspace").getPathString();
     FileSystemUtils.appendIsoLatin1(
         scratch.resolve("WORKSPACE"),
@@ -223,13 +273,13 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
     ConfiguredTarget androidSdk = getConfiguredTarget("@androidsdk//:sdk");
     assertThat(androidSdk).isNotNull();
     assertThat(androidSdk.get(AndroidSdkProvider.PROVIDER).getBuildToolsVersion())
-        .isEqualTo("26.0.2");
+        .isEqualTo("400.0.2");
   }
 
   @Test
   public void testApiLevelHighestVersionDetection() throws Exception {
     scratchPlatformsDirectories(24, 25, 23);
-    scratchBuildToolsDirectories("26.0.1");
+    scratchBuildToolsDirectories();
     String bazelToolsWorkspace = scratch.dir("bazel_tools_workspace").getPathString();
     FileSystemUtils.appendIsoLatin1(
         scratch.resolve("WORKSPACE"),
@@ -237,7 +287,6 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
         "android_sdk_repository(",
         "    name = 'androidsdk',",
         "    path = '/sdk',",
-        "    build_tools_version = '26.0.1',",
         ")");
     invalidatePackages();
 
@@ -251,7 +300,7 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
   public void testMultipleAndroidSdkApiLevels() throws Exception {
     int[] apiLevels = {23, 24, 25};
     scratchPlatformsDirectories(apiLevels);
-    scratchBuildToolsDirectories("26.0.1");
+    scratchBuildToolsDirectories();
     String bazelToolsWorkspace = scratch.dir("bazel_tools_workspace").getPathString();
     FileSystemUtils.appendIsoLatin1(
         scratch.resolve("WORKSPACE"),
@@ -260,7 +309,6 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
         "    name = 'androidsdk',",
         "    path = '/sdk',",
         "    api_level = 24,",
-        "    build_tools_version = '26.0.1',",
         ")");
     invalidatePackages();
 
@@ -276,7 +324,7 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
   @Test
   public void testMissingApiLevel() throws Exception {
     scratchPlatformsDirectories(24);
-    scratchBuildToolsDirectories("26.0.1");
+    scratchBuildToolsDirectories();
     String bazelToolsWorkspace = scratch.dir("bazel_tools_workspace").getPathString();
     FileSystemUtils.appendIsoLatin1(
         scratch.resolve("WORKSPACE"),
@@ -285,9 +333,9 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
         "    name = 'androidsdk',",
         "    path = '/sdk',",
         "    api_level = 25,",
-        "    build_tools_version = '26.0.1',",
         ")");
     invalidatePackages();
+    reporter.removeHandler(failFastHandler);
 
     try {
       getTarget("@androidsdk//:files");
@@ -305,7 +353,7 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
   @Test
   public void testFilesInSystemImagesDirectories() throws Exception {
     scratchPlatformsDirectories(24);
-    scratchBuildToolsDirectories("26.0.1");
+    scratchBuildToolsDirectories();
     scratch.file("/sdk/system-images/.DS_Store");
     String bazelToolsWorkspace = scratch.dir("bazel_tools_workspace").getPathString();
     FileSystemUtils.appendIsoLatin1(
@@ -322,7 +370,7 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
 
   @Test
   public void testMissingPlatformsDirectory() throws Exception {
-    scratchBuildToolsDirectories("26.0.1");
+    scratchBuildToolsDirectories();
     String bazelToolsWorkspace = scratch.dir("bazel_tools_workspace").getPathString();
     FileSystemUtils.appendIsoLatin1(
         scratch.resolve("WORKSPACE"),
@@ -332,6 +380,7 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
         "    path = '/sdk',",
         ")");
     invalidatePackages();
+    reporter.removeHandler(failFastHandler);
 
     try {
       getTarget("@androidsdk//:files");
@@ -355,6 +404,7 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
         "    path = '/sdk',",
         ")");
     invalidatePackages();
+    reporter.removeHandler(failFastHandler);
 
     try {
       getTarget("@androidsdk//:files");
@@ -364,5 +414,56 @@ public class AndroidSdkRepositoryTest extends BuildViewTestCase {
           .contains("Expected directory at /sdk/build-tools but it is not a directory or it does "
               + "not exist.");
     }
+  }
+
+  @Test
+  public void testAndroidRevision() {
+    assertThat(AndroidRevision.parse("2.0.0")).isGreaterThan(AndroidRevision.parse("1.0.0"));
+    assertThat(AndroidRevision.parse("12.0.0")).isGreaterThan(AndroidRevision.parse("11.0.0"));
+    assertThat(AndroidRevision.parse("1.1.0")).isGreaterThan(AndroidRevision.parse("1.0.0"));
+    assertThat(AndroidRevision.parse("1.0.1")).isGreaterThan(AndroidRevision.parse("1.0.0"));
+    assertThat(AndroidRevision.parse("1.1.1")).isGreaterThan(AndroidRevision.parse("1.0.1"));
+
+    assertThat(AndroidRevision.parse("1.1.0-rc1"))
+        .isGreaterThan(AndroidRevision.parse("1.0.0-rc1"));
+    assertThat(AndroidRevision.parse("1.1.0-alpha1"))
+        .isGreaterThan(AndroidRevision.parse("1.0.0-rc1"));
+
+    assertThat(AndroidRevision.parse("1.0.0")).isGreaterThan(AndroidRevision.parse("1.0.0-rc1"));
+    assertThat(AndroidRevision.parse("1.0.0")).isGreaterThan(AndroidRevision.parse("1.0.0-rc2"));
+    assertThat(AndroidRevision.parse("1.0.0")).isGreaterThan(AndroidRevision.parse("1.0.0-alpha1"));
+    assertThat(AndroidRevision.parse("1.0.0")).isGreaterThan(AndroidRevision.parse("1.0.0-alpha2"));
+    assertThat(AndroidRevision.parse("1.0.0")).isGreaterThan(AndroidRevision.parse("1.0.0-beta1"));
+    assertThat(AndroidRevision.parse("1.0.0")).isGreaterThan(AndroidRevision.parse("1.0.0-beta2"));
+
+    assertThat(AndroidRevision.parse("1.0.0-rc1"))
+        .isGreaterThan(AndroidRevision.parse("1.0.0-beta1"));
+    assertThat(AndroidRevision.parse("1.0.0-beta1"))
+        .isGreaterThan(AndroidRevision.parse("1.0.0-alpha1"));
+    assertThat(AndroidRevision.parse("1.0.0-beta1"))
+        .isGreaterThan(AndroidRevision.parse("1.0.0-alpha2"));
+
+    assertThat(AndroidRevision.parse("1.0.0-rc2"))
+        .isGreaterThan(AndroidRevision.parse("1.0.0-rc1"));
+    assertThat(AndroidRevision.parse("1.0.0-beta2"))
+        .isGreaterThan(AndroidRevision.parse("1.0.0-beta1"));
+    assertThat(AndroidRevision.parse("1.0.0-alpha2"))
+        .isGreaterThan(AndroidRevision.parse("1.0.0-alpha1"));
+
+    assertThat(AndroidRevision.parse("1.1.0-rc1"))
+        .isEquivalentAccordingToCompareTo(AndroidRevision.parse("1.1.0 rc1"));
+
+    assertThat(AndroidRevision.parse("1.0"))
+        .isEquivalentAccordingToCompareTo(AndroidRevision.parse("1.0.0"));
+
+    assertThat(AndroidRevision.parse("2")).isGreaterThan(AndroidRevision.parse("1"));
+    assertThat(AndroidRevision.parse("2.1")).isGreaterThan(AndroidRevision.parse("2"));
+    assertThat(AndroidRevision.parse("2")).isGreaterThan(AndroidRevision.parse("1.0"));
+    assertThat(AndroidRevision.parse("2")).isGreaterThan(AndroidRevision.parse("1"));
+    assertThat(AndroidRevision.parse("1 rc1")).isGreaterThan(AndroidRevision.parse("1 beta1"));
+
+    assertThrows(NumberFormatException.class, () -> AndroidRevision.parse("1 0 0"));
+    assertThrows(NumberFormatException.class, () -> AndroidRevision.parse("1.0.0-abc1"));
+    assertThrows(NumberFormatException.class, () -> AndroidRevision.parse("1.0.0-rc 1"));
   }
 }

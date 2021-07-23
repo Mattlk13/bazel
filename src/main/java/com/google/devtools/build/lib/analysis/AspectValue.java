@@ -20,11 +20,11 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.packages.Aspect;
 import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.lib.skyframe.AspectValueKey.AspectKey;
-import com.google.devtools.build.lib.syntax.Location;
 import javax.annotation.Nullable;
+import net.starlark.java.syntax.Location;
 
 /** An aspect in the context of the Skyframe graph. */
-public final class AspectValue extends BasicActionLookupValue implements ConfiguredObjectValue {
+public final class AspectValue extends BasicActionLookupValue implements RuleConfiguredObjectValue {
   // These variables are only non-final because they may be clear()ed to save memory. They are null
   // only after they are cleared except for transitivePackagesForPackageRootResolution.
   @Nullable private Aspect aspect;

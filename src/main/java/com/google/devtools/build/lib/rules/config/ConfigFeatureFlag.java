@@ -38,16 +38,16 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.Attribute.ComputedDefault;
 import com.google.devtools.build.lib.packages.AttributeMap;
-import com.google.devtools.build.lib.syntax.Starlark;
 import java.util.List;
 import java.util.Optional;
+import net.starlark.java.eval.Starlark;
 
 /**
  * The implementation of the config_feature_flag rule for defining custom flags for Android rules.
  */
 public class ConfigFeatureFlag implements RuleConfiguredTargetFactory {
   /** The name of the policy that is used to restrict access to the config_feature_flag rule. */
-  private static final String ALLOWLIST_NAME = "config_feature_flag";
+  public static final String ALLOWLIST_NAME = "config_feature_flag";
 
   /** The label of the policy that is used to restrict access to the config_feature_flag rule. */
   private static final String ALLOWLIST_LABEL =
@@ -77,27 +77,9 @@ public class ConfigFeatureFlag implements RuleConfiguredTargetFactory {
             });
   }
 
-  /**
-   * Returns whether config_feature_flag and related features are available to the current rule.
-   *
-   * <p>The current rule must have an attribute defined on it created with {@link
-   * #getAllowlistAttribute}.
-   */
-  public static boolean isAvailable(RuleContext ruleContext) {
-    return Allowlist.isAvailable(ruleContext, ALLOWLIST_NAME);
-  }
-
   @Override
   public ConfiguredTarget create(RuleContext ruleContext)
       throws InterruptedException, RuleErrorException, ActionConflictException {
-    if (!ConfigFeatureFlag.isAvailable(ruleContext)) {
-      throw ruleContext.throwWithRuleError(
-          String.format(
-              "the %s rule is not available in package '%s'",
-              ruleContext.getRuleClassNameForLogging(),
-              ruleContext.getLabel().getPackageIdentifier()));
-    }
-
     List<String> specifiedValues = ruleContext.attributes().get("allowed_values", STRING_LIST);
     ImmutableSet<String> values = ImmutableSet.copyOf(specifiedValues);
     Predicate<String> isValidValue = Predicates.in(values);

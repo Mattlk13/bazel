@@ -47,14 +47,35 @@ public class RepositoryOptions extends OptionsBase {
   public PathFragment experimentalRepositoryCache;
 
   @Option(
+      name = "registry",
+      defaultValue = "null",
+      allowMultiple = true,
+      documentationCategory = OptionDocumentationCategory.BAZEL_CLIENT_OPTIONS,
+      effectTags = {OptionEffectTag.CHANGES_INPUTS},
+      help =
+          "Specifies the registries to use to locate Bazel module dependencies. The order is"
+              + " important: modules will be looked up in earlier registries first, and only fall"
+              + " back to later registries when they're missing from the earlier ones.")
+  public List<String> registries;
+
+  @Option(
       name = "experimental_repository_cache_hardlinks",
       defaultValue = "false",
       documentationCategory = OptionDocumentationCategory.BAZEL_CLIENT_OPTIONS,
       effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
       help =
           "If set, the repository cache will hardlink the file in case of a"
-              + " cache hit, rather than copying. This is inteded to save disk space.")
+              + " cache hit, rather than copying. This is intended to save disk space.")
   public boolean useHardlinks;
+
+  @Option(
+      name = "experimental_repository_disable_download",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.BAZEL_CLIENT_OPTIONS,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      metadataTags = {OptionMetadataTag.EXPERIMENTAL},
+      help = "If set, downloading external repositories is not allowed.")
+  public boolean disableDownload;
 
   @Option(
       name = "distdir",
@@ -133,6 +154,30 @@ public class RepositoryOptions extends OptionsBase {
       help = "If non-empty read the specified resolved file instead of the WORKSPACE file")
   public String experimentalResolvedFileInsteadOfWorkspace;
 
+  @Option(
+      name = "experimental_downloader_config",
+      defaultValue = "null",
+      documentationCategory = OptionDocumentationCategory.REMOTE,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help =
+          "Specify a file to configure the remote downloader with. This file consists of lines, "
+              + "each of which starts with a directive (`allow`, `block` or `rewrite`) followed "
+              + "by either a host name (for `allow` and `block`) or two patterns, one to match "
+              + "against, and one to use as a substitute URL, with back-references starting from "
+              + "`$1`. It is possible for multiple `rewrite` directives for the same URL to be "
+              + "give, and in this case multiple URLs will be returned.")
+  public String downloaderConfig;
+
+  @Option(
+      name = "experimental_enable_bzlmod",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.BAZEL_CLIENT_OPTIONS,
+      effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
+      help =
+          "If true, Bazel tries to load external repositories from the Bzlmod system before "
+              + "looking into the WORKSPACE file.")
+  public boolean enableBzlmod;
+
   /**
    * Converts from an equals-separated pair of strings into RepositoryName->PathFragment mapping.
    */
@@ -140,7 +185,7 @@ public class RepositoryOptions extends OptionsBase {
 
     @Override
     public RepositoryOverride convert(String input) throws OptionsParsingException {
-      String[] pieces = input.split("=");
+      String[] pieces = input.split("=", 2);
       if (pieces.length != 2) {
         throw new OptionsParsingException(
             "Repository overrides must be of the form 'repository-name=path'", input);

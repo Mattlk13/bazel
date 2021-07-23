@@ -13,17 +13,18 @@
 // limitations under the License.
 package com.google.devtools.build.lib.actions;
 
+import static java.nio.charset.StandardCharsets.ISO_8859_1;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
+import com.google.common.hash.HashFunction;
 import com.google.common.io.BaseEncoding;
-import com.google.devtools.build.lib.actions.cache.DigestUtils;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
-import com.google.devtools.build.lib.util.BigIntegerFingerprint;
-import com.google.devtools.build.lib.vfs.DigestHashFunction;
-import com.google.devtools.build.lib.vfs.DigestHashFunction.DefaultHashFunctionNotSetException;
+import com.google.devtools.build.lib.util.Fingerprint;
+import com.google.devtools.build.lib.vfs.DigestUtils;
 import com.google.devtools.build.lib.vfs.FileStatus;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -31,8 +32,6 @@ import com.google.devtools.build.lib.vfs.Symlinks;
 import com.google.devtools.build.skyframe.SkyValue;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.math.BigInteger;
-import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Objects;
 import javax.annotation.Nullable;
@@ -92,13 +91,9 @@ public abstract class FileArtifactValue implements SkyValue, HasDigest {
   public abstract FileContentsProxy getContentsProxy();
 
   @Nullable
-  public BigInteger getValueFingerprint() {
-    byte[] digest = getDigest();
-    if (digest != null) {
-      return new BigIntegerFingerprint().addDigestedBytes(digest).getFingerprint();
-    }
+  public byte[] getValueFingerprint() {
     // TODO(janakr): return fingerprint in other cases: symlink, directory.
-    return null;
+    return getDigest();
   }
 
   /**
@@ -118,11 +113,6 @@ public abstract class FileArtifactValue implements SkyValue, HasDigest {
    */
   public String getActionId() {
     return "";
-  }
-
-  /** Returns {@code true} if this is a special marker as opposed to a representing a real file. */
-  public boolean isMarkerValue() {
-    return this instanceof Singleton;
   }
 
   /** Returns {@code true} if the file only exists remotely. */
@@ -161,6 +151,18 @@ public abstract class FileArtifactValue implements SkyValue, HasDigest {
       // If not, we assume by default that the file has changed, but individual implementations
       // might know better. For example, regular local files can be compared by ctime or mtime.
       return couldBeModifiedByMetadata(lastKnown);
+    }
+  }
+
+  /** Adds this file metadata to the given {@link Fingerprint}. */
+  public final void addTo(Fingerprint fp) {
+    byte[] digest = getDigest();
+    if (digest != null) {
+      fp.addBytes(digest);
+    } else {
+      // Use the timestamp if the digest is not present, but not both. Modifying a timestamp while
+      // keeping the contents of a file the same should not cause rebuilds.
+      fp.addLong(getModifiedTime());
     }
   }
 
@@ -256,19 +258,13 @@ public abstract class FileArtifactValue implements SkyValue, HasDigest {
     return new RegularFileArtifactValue(digest, /*proxy=*/ null, size);
   }
 
-  public static FileArtifactValue createForUnresolvedSymlink(PathFragment symlinkTarget) {
-    DigestHashFunction digestHashFunction;
-
-    try {
-      digestHashFunction = DigestHashFunction.getDefault();
-    } catch (DefaultHashFunctionNotSetException e) {
-      throw new IllegalStateException(e);
-    }
-
+  public static FileArtifactValue createForUnresolvedSymlink(Path symlink) throws IOException {
     byte[] digest =
-        digestHashFunction
+        symlink
+            .getFileSystem()
+            .getDigestFunction()
             .getHashFunction()
-            .hashString(symlinkTarget.getPathString(), StandardCharsets.ISO_8859_1)
+            .hashString(symlink.readSymbolicLink().getPathString(), ISO_8859_1)
             .asBytes();
 
     // We need to be able to tell the difference between a symlink and a file containing the same
@@ -357,11 +353,11 @@ public abstract class FileArtifactValue implements SkyValue, HasDigest {
     }
 
     @Override
-    public BigInteger getValueFingerprint() {
-      BigIntegerFingerprint fp = new BigIntegerFingerprint();
-      fp.addString(getClass().getCanonicalName());
-      fp.addLong(mtime);
-      return fp.getFingerprint();
+    public byte[] getValueFingerprint() {
+      return new Fingerprint()
+          .addString(getClass().getCanonicalName())
+          .addLong(mtime)
+          .digestAndReset();
     }
 
     @Override
@@ -549,14 +545,14 @@ public abstract class FileArtifactValue implements SkyValue, HasDigest {
   }
 
   /** Metadata for remotely stored files. */
-  public static final class RemoteFileArtifactValue extends FileArtifactValue {
+  public static class RemoteFileArtifactValue extends FileArtifactValue {
     private final byte[] digest;
     private final long size;
     private final int locationIndex;
     private final String actionId;
 
     public RemoteFileArtifactValue(byte[] digest, long size, int locationIndex, String actionId) {
-      this.digest = digest;
+      this.digest = Preconditions.checkNotNull(digest, actionId);
       this.size = size;
       this.locationIndex = locationIndex;
       this.actionId = actionId;
@@ -575,12 +571,15 @@ public abstract class FileArtifactValue implements SkyValue, HasDigest {
       RemoteFileArtifactValue that = (RemoteFileArtifactValue) o;
       return Arrays.equals(digest, that.digest)
           && size == that.size
-          && locationIndex == that.locationIndex;
+          && locationIndex == that.locationIndex
+          && Objects.equals(actionId, that.actionId)
+          && dataIsShareable() == that.dataIsShareable();
     }
 
     @Override
     public int hashCode() {
-      return Objects.hash(Arrays.hashCode(digest), size, locationIndex, dataIsShareable());
+      return Objects.hash(
+          Arrays.hashCode(digest), size, locationIndex, actionId, dataIsShareable());
     }
 
     @Override
@@ -689,6 +688,10 @@ public abstract class FileArtifactValue implements SkyValue, HasDigest {
       this.digest = Preconditions.checkNotNull(digest);
     }
 
+    private InlineFileArtifactValue(byte[] bytes, HashFunction hashFunction) {
+      this(bytes, hashFunction.hashBytes(bytes).asBytes());
+    }
+
     @Override
     public boolean equals(Object o) {
       if (!(o instanceof InlineFileArtifactValue)) {
@@ -704,16 +707,11 @@ public abstract class FileArtifactValue implements SkyValue, HasDigest {
       return Objects.hash(Arrays.hashCode(digest), dataIsShareable());
     }
 
-    private InlineFileArtifactValue(byte[] bytes) {
-      this(
-          bytes,
-          DigestHashFunction.getDefaultUnchecked().getHashFunction().hashBytes(bytes).asBytes());
-    }
-
-    public static InlineFileArtifactValue create(byte[] bytes, boolean shareable) {
+    public static InlineFileArtifactValue create(
+        byte[] bytes, boolean shareable, HashFunction hashFunction) {
       return shareable
-          ? new InlineFileArtifactValue(bytes)
-          : new UnshareableInlineFileArtifactValue(bytes);
+          ? new InlineFileArtifactValue(bytes, hashFunction)
+          : new UnshareableInlineFileArtifactValue(bytes, hashFunction);
     }
 
     public ByteArrayInputStream getInputStream() {
@@ -752,8 +750,8 @@ public abstract class FileArtifactValue implements SkyValue, HasDigest {
   }
 
   private static final class UnshareableInlineFileArtifactValue extends InlineFileArtifactValue {
-    UnshareableInlineFileArtifactValue(byte[] bytes) {
-      super(bytes);
+    UnshareableInlineFileArtifactValue(byte[] bytes, HashFunction hashFunction) {
+      super(bytes, hashFunction);
     }
 
     @Override
@@ -765,10 +763,10 @@ public abstract class FileArtifactValue implements SkyValue, HasDigest {
   /**
    * Used to resolve source symlinks when diskless.
    *
-   * <p>When {@link com.google.devtools.build.lib.skyframe.ActionFileSystem} creates symlinks, it
-   * relies on metadata ({@link FileArtifactValue}) to resolve the actual underlying data. In the
-   * case of remote or inline files, this information is self-contained. However, in the case of
-   * source files, the path is required to resolve the content.
+   * <p>When the optional per-action file system creates symlinks, it relies on metadata ({@link
+   * FileArtifactValue}) to resolve the actual underlying data. In the case of remote or inline
+   * files, this information is self-contained. However, in the case of source files, the path is
+   * required to resolve the content.
    */
   public static final class SourceFileArtifactValue extends FileArtifactValue {
     private final PathFragment execPath;
@@ -834,6 +832,8 @@ public abstract class FileArtifactValue implements SkyValue, HasDigest {
   }
 
   private static final class SingletonMarkerValue extends FileArtifactValue implements Singleton {
+    private static final byte[] FINGERPRINT = new byte[] {0x10};
+
     @Override
     public FileStateType getType() {
       return FileStateType.NONEXISTENT;
@@ -865,10 +865,9 @@ public abstract class FileArtifactValue implements SkyValue, HasDigest {
       return false;
     }
 
-    @Nullable
     @Override
-    public BigInteger getValueFingerprint() {
-      return BigInteger.TEN;
+    public byte[] getValueFingerprint() {
+      return FINGERPRINT;
     }
 
     @Override
@@ -904,7 +903,7 @@ public abstract class FileArtifactValue implements SkyValue, HasDigest {
     }
 
     @Override
-    public boolean wasModifiedSinceDigest(Path path) throws IOException {
+    public boolean wasModifiedSinceDigest(Path path) {
       return false;
     }
 

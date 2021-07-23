@@ -20,7 +20,6 @@ import static com.google.devtools.build.lib.packages.BuildType.LABEL_LIST;
 import com.google.common.collect.Iterables;
 import com.google.common.eventbus.EventBus;
 import com.google.devtools.build.lib.analysis.AnalysisProtos;
-import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.config.TransitionFactories;
 import com.google.devtools.build.lib.analysis.util.MockRule;
 import com.google.devtools.build.lib.events.Event;
@@ -45,7 +44,7 @@ import org.junit.Test;
 /**
  * Test for cquery's proto output format.
  *
- * <p>TODO(juliexxia): refactor all cquery output format tests to consolidate duplicate
+ * <p>TODO(blaze-configurability): refactor all cquery output format tests to consolidate duplicate
  * infrastructure.
  */
 public class ProtoOutputFormatterCallbackTest extends ConfiguredTargetQueryTest {
@@ -57,10 +56,14 @@ public class ProtoOutputFormatterCallbackTest extends ConfiguredTargetQueryTest 
   @Before
   public final void setUpCqueryOptions() {
     this.options = new CqueryOptions();
+    // TODO(bazel-team): reduce the confusion about these two seemingly similar settings.
+    // options.aspectDeps impacts how proto and similar output formatters output aspect results.
+    // Setting.INCLUDE_ASPECTS impacts whether or not aspect dependencies are included when
+    // following target deps. See CommonQueryOptions for further flag details.
     options.aspectDeps = Mode.OFF;
+    helper.setQuerySettings(Setting.INCLUDE_ASPECTS);
     options.protoIncludeConfigurations = true;
     options.protoIncludeRuleInputsAndOutputs = true;
-
     this.reporter = new Reporter(new EventBus(), events::add);
   }
 
@@ -85,7 +88,7 @@ public class ProtoOutputFormatterCallbackTest extends ConfiguredTargetQueryTest 
         ")",
         "config_setting(",
         "  name = 'garfield',",
-        "  values = {'test_arg': 'cat'}",
+        "  values = {'foo': 'cat'}",
         ")");
 
     AnalysisProtos.ConfiguredTarget myRuleProto =
@@ -100,7 +103,7 @@ public class ProtoOutputFormatterCallbackTest extends ConfiguredTargetQueryTest 
       break;
     }
 
-    getHelper().useConfiguration("--test_arg=cat");
+    getHelper().useConfiguration("--foo=cat");
     myRuleProto = Iterables.getOnlyElement(getOutput("//test:my_rule").getResultsList());
     attributes = myRuleProto.getTarget().getRule().getAttributeList();
     for (Build.Attribute attribute : attributes) {
@@ -116,7 +119,7 @@ public class ProtoOutputFormatterCallbackTest extends ConfiguredTargetQueryTest 
 
   @Test
   public void testConfigurationHash() throws Exception {
-    TestArgPatchTransition attributePatchTransition = new TestArgPatchTransition("SET BY PATCH");
+    FooPatchTransition attributePatchTransition = new FooPatchTransition("SET BY PATCH");
 
     MockRule ruleWithPatch =
         () ->
@@ -140,7 +143,7 @@ public class ProtoOutputFormatterCallbackTest extends ConfiguredTargetQueryTest 
     // Assert checksum from proto is proper checksum.
     AnalysisProtos.ConfiguredTarget myRuleProto =
         Iterables.getOnlyElement(getOutput("//test:my_rule").getResultsList());
-    ConfiguredTarget myRule = Iterables.getOnlyElement(eval("//test:my_rule"));
+    KeyedConfiguredTarget myRule = Iterables.getOnlyElement(eval("//test:my_rule"));
 
     assertThat(myRuleProto.getConfiguration().getChecksum())
         .isEqualTo(myRule.getConfigurationChecksum());
@@ -186,11 +189,11 @@ public class ProtoOutputFormatterCallbackTest extends ConfiguredTargetQueryTest 
         ")",
         "config_setting(",
         "  name = 'config1',",
-        "  values = {'test_arg': 'woof'},",
+        "  values = {'foo': 'woof'},",
         ")",
         "simple_rule(name = 'target1')",
         "simple_rule(name = 'target2')");
-    getHelper().useConfiguration("--test_arg=woof");
+    getHelper().useConfiguration("--foo=woof");
     helper.setQuerySettings(Setting.NO_IMPLICIT_DEPS);
 
     List<AnalysisProtos.ConfiguredTarget> myAliasRuleProto =
@@ -212,7 +215,7 @@ public class ProtoOutputFormatterCallbackTest extends ConfiguredTargetQueryTest 
     Set<String> targetPatternSet = new LinkedHashSet<>();
     expression.collectTargetPatterns(targetPatternSet);
     helper.setQuerySettings(Setting.NO_IMPLICIT_DEPS);
-    PostAnalysisQueryEnvironment<ConfiguredTarget> env =
+    PostAnalysisQueryEnvironment<KeyedConfiguredTarget> env =
         ((ConfiguredTargetQueryHelper) helper).getPostAnalysisQueryEnvironment(targetPatternSet);
 
     ProtoOutputFormatterCallback callback =

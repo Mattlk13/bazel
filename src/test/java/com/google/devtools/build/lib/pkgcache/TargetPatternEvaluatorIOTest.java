@@ -17,11 +17,13 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.truth.Truth;
 import com.google.devtools.build.lib.clock.BlazeClock;
 import com.google.devtools.build.lib.events.EventKind;
+import com.google.devtools.build.lib.vfs.DigestHashFunction;
 import com.google.devtools.build.lib.vfs.Dirent;
 import com.google.devtools.build.lib.vfs.FileStatus;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryContentInfo;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
 import java.io.IOException;
@@ -35,19 +37,18 @@ import org.junit.runners.JUnit4;
 /** TargetPatternEvaluator tests that require a custom filesystem. */
 @RunWith(JUnit4.class)
 public class TargetPatternEvaluatorIOTest extends AbstractTargetPatternEvaluatorTest {
-  private static final String FS_ROOT = "/fsg";
-
   private static class Transformer {
     @SuppressWarnings("unused")
     @Nullable
-    public FileStatus stat(FileStatus stat, Path path, boolean followSymlinks) throws IOException {
+    public FileStatus stat(FileStatus stat, PathFragment path, boolean followSymlinks)
+        throws IOException {
       return stat;
     }
 
     @SuppressWarnings("unused")
     @Nullable
-    public Collection<Dirent> readdir(Collection<Dirent> readdir, Path path, boolean followSymlinks)
-        throws IOException {
+    public Collection<Dirent> readdir(
+        Collection<Dirent> readdir, PathFragment path, boolean followSymlinks) throws IOException {
       return readdir;
     }
   }
@@ -56,22 +57,22 @@ public class TargetPatternEvaluatorIOTest extends AbstractTargetPatternEvaluator
 
   @Override
   protected FileSystem createFileSystem() {
-    return new InMemoryFileSystem(BlazeClock.instance()) {
+    return new InMemoryFileSystem(DigestHashFunction.SHA256) {
       @Override
-      public FileStatus stat(Path path, boolean followSymlinks) throws IOException {
+      public FileStatus stat(PathFragment path, boolean followSymlinks) throws IOException {
         FileStatus defaultResult = super.stat(path, followSymlinks);
         return transformer.stat(defaultResult, path, followSymlinks);
       }
 
       @Nullable
       @Override
-      public FileStatus statIfFound(Path path, boolean followSymlinks) {
+      public FileStatus statIfFound(PathFragment path, boolean followSymlinks) {
         return statNullable(path, followSymlinks);
       }
 
       @Nullable
       @Override
-      public FileStatus statNullable(Path path, boolean followSymlinks) {
+      public FileStatus statNullable(PathFragment path, boolean followSymlinks) {
         FileStatus defaultResult = super.statNullable(path, followSymlinks);
         try {
           return transformer.stat(defaultResult, path, followSymlinks);
@@ -81,7 +82,8 @@ public class TargetPatternEvaluatorIOTest extends AbstractTargetPatternEvaluator
       }
 
       @Override
-      protected Collection<Dirent> readdir(Path path, boolean followSymlinks) throws IOException {
+      protected Collection<Dirent> readdir(PathFragment path, boolean followSymlinks)
+          throws IOException {
         Collection<Dirent> defaultResult = super.readdir(path, followSymlinks);
         return transformer.readdir(defaultResult, path, followSymlinks);
       }
@@ -151,7 +153,7 @@ public class TargetPatternEvaluatorIOTest extends AbstractTargetPatternEvaluator
     return new Transformer() {
       @Nullable
       @Override
-      public FileStatus stat(final FileStatus stat, Path path, boolean followSymlinks)
+      public FileStatus stat(final FileStatus stat, PathFragment path, boolean followSymlinks)
           throws IOException {
         if (path.getPathString().endsWith(badPathSuffix)) {
           return new InMemoryContentInfo(BlazeClock.instance()) {
@@ -177,7 +179,7 @@ public class TargetPatternEvaluatorIOTest extends AbstractTargetPatternEvaluator
             }
 
             @Override
-            public long getSize()  {
+            public long getSize() {
               try {
                 return stat.getSize();
               } catch (IOException e) {
@@ -222,8 +224,9 @@ public class TargetPatternEvaluatorIOTest extends AbstractTargetPatternEvaluator
     return new Transformer() {
       @Nullable
       @Override
-      public Collection<Dirent> readdir(Collection<Dirent> readdir, Path path,
-          boolean followSymlinks) throws IOException {
+      public Collection<Dirent> readdir(
+          Collection<Dirent> readdir, PathFragment path, boolean followSymlinks)
+          throws IOException {
         if (path.getPathString().endsWith(badPathSuffix)) {
           throw new IOException("Path ended in " + badPathSuffix + ", so readdir failed.");
         }

@@ -19,7 +19,6 @@ import com.google.devtools.build.lib.actions.ArtifactRoot;
 import com.google.devtools.build.lib.analysis.FilesToRunProvider;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.Runfiles;
-import com.google.devtools.build.lib.analysis.TransitionMode;
 import com.google.devtools.build.lib.analysis.actions.CustomCommandLine;
 import com.google.devtools.build.lib.analysis.actions.SpawnAction;
 import com.google.devtools.build.lib.util.FileType;
@@ -87,7 +86,7 @@ public final class PythonUtils {
         // If we have a python or .so file at this level...
         if (REQUIRES_INIT_PY.matches(source)) {
           // ...then record that we need an __init__.py in this and all parents directories...
-          while (source.segmentCount() > 1) {
+          while (source.isMultiSegment()) {
             source = source.getParentDirectory();
             // ...unless it's a Python .pyc cache or we already have __init__ there.
             if (!source.endsWith(PYCACHE) && !hasPackageInitDirs.contains(source)) {
@@ -121,7 +120,8 @@ public final class PythonUtils {
    */
   @Nullable
   private static Artifact get2to3OutputArtifact(RuleContext ruleContext, Artifact input) {
-    PathFragment rootRelativePath = input.getRootRelativePath();
+    PathFragment rootRelativePath =
+        input.getOutputDirRelativePath(ruleContext.getConfiguration().isSiblingRepositoryLayout());
     if (!rootRelativePath.startsWith(ruleContext.getPackageDirectory())) {
       ruleContext.ruleError(
           String.format(
@@ -129,8 +129,7 @@ public final class PythonUtils {
               rootRelativePath));
       return null;
     }
-    ArtifactRoot root =
-        ruleContext.getConfiguration().getGenfilesDirectory(ruleContext.getRule().getRepository());
+    ArtifactRoot root = ruleContext.getGenfilesDirectory();
     return ruleContext.getDerivedArtifact(rootRelativePath, root);
   }
 
@@ -164,8 +163,7 @@ public final class PythonUtils {
    */
   @Nullable
   private static Artifact generate2to3Action(RuleContext ruleContext, Artifact input) {
-    FilesToRunProvider py2to3converter =
-        ruleContext.getExecutablePrerequisite("$python2to3", TransitionMode.HOST);
+    FilesToRunProvider py2to3converter = ruleContext.getExecutablePrerequisite("$python2to3");
     Artifact output = get2to3OutputArtifact(ruleContext, input);
     if (output == null) {
       return null;

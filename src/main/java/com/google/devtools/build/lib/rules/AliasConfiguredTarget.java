@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules;
 
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableCollection;
 import com.google.common.collect.ImmutableMap;
@@ -30,11 +31,11 @@ import com.google.devtools.build.lib.packages.Provider;
 import com.google.devtools.build.lib.skyframe.BuildConfigurationValue;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
-import com.google.devtools.build.lib.syntax.ClassObject;
-import com.google.devtools.build.lib.syntax.EvalException;
-import com.google.devtools.build.lib.syntax.Printer;
-import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import javax.annotation.Nullable;
+import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.Printer;
+import net.starlark.java.eval.StarlarkSemantics;
+import net.starlark.java.eval.Structure;
 
 /**
  * This configured target pretends to be whatever type of target "actual" is, returning its label,
@@ -44,7 +45,7 @@ import javax.annotation.Nullable;
  */
 @AutoCodec
 @Immutable
-public final class AliasConfiguredTarget implements ConfiguredTarget, ClassObject {
+public final class AliasConfiguredTarget implements ConfiguredTarget, Structure {
   private final Label label;
   private final BuildConfigurationValue.Key configurationKey;
   private final ConfiguredTarget actual;
@@ -84,6 +85,7 @@ public final class AliasConfiguredTarget implements ConfiguredTarget, ClassObjec
     return true; // immutable and Starlark-hashable
   }
 
+  @Override
   public ImmutableMap<Label, ConfigMatchingProvider> getConfigConditions() {
     return configConditions;
   }
@@ -131,7 +133,7 @@ public final class AliasConfiguredTarget implements ConfiguredTarget, ClassObjec
     return configurationKey;
   }
 
-  /* ClassObject methods */
+  /* Structure methods */
 
   @Override
   public Object getValue(String name) {
@@ -171,5 +173,16 @@ public final class AliasConfiguredTarget implements ConfiguredTarget, ClassObjec
   @Override
   public void repr(Printer printer) {
     printer.append("<alias target " + label + " of " + actual.getLabel() + ">");
+  }
+
+  @Override
+  public String toString() {
+    return MoreObjects.toStringHelper(this)
+        .add("label", label)
+        .add("configurationKey", configurationKey)
+        .add("actual", actual)
+        .add("overrides", overrides)
+        .add("configConditions", configConditions)
+        .toString();
   }
 }

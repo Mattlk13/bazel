@@ -20,20 +20,18 @@ import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
-import com.google.devtools.build.lib.syntax.EvalException;
 import java.io.Serializable;
 import java.util.Collections;
 import java.util.List;
+import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.Starlark;
 
 /**
- * A rule visibility that simply says yes or no. It corresponds to public,
- * legacy_public and private visibilities.
+ * A rule visibility that simply says yes or no. It corresponds to public and private visibilities.
  */
-@Immutable @ThreadSafe
+@Immutable
+@ThreadSafe
 public class ConstantRuleVisibility implements RuleVisibility, Serializable {
-  @AutoCodec
-  static final Label LEGACY_PUBLIC_LABEL; // same as "public"; used for automated depot cleanup
-
   @AutoCodec @AutoCodec.VisibleForSerialization static final Label PUBLIC_LABEL;
   @AutoCodec @AutoCodec.VisibleForSerialization static final Label PRIVATE_LABEL;
 
@@ -44,7 +42,6 @@ public class ConstantRuleVisibility implements RuleVisibility, Serializable {
   static {
     try {
       PUBLIC_LABEL = Label.parseAbsolute("//visibility:public", ImmutableMap.of());
-      LEGACY_PUBLIC_LABEL = Label.parseAbsolute("//visibility:legacy_public", ImmutableMap.of());
       PRIVATE_LABEL = Label.parseAbsolute("//visibility:private", ImmutableMap.of());
     } catch (LabelSyntaxException e) {
       throw new IllegalStateException();
@@ -53,7 +50,7 @@ public class ConstantRuleVisibility implements RuleVisibility, Serializable {
 
   private final boolean result;
 
-  public ConstantRuleVisibility(boolean result) {
+  private ConstantRuleVisibility(boolean result) {
     this.result = result;
   }
 
@@ -86,16 +83,16 @@ public class ConstantRuleVisibility implements RuleVisibility, Serializable {
     for (Label label : labels) {
       visibility = tryParse(label);
       if (visibility != null) {
-        throw new EvalException(null,
-            "Public or private visibility labels (e.g. //visibility:public or" +
-            " //visibility:private) cannot be used in combination with other labels");
+        throw Starlark.errorf(
+            "Public or private visibility labels (e.g. //visibility:public or"
+                + " //visibility:private) cannot be used in combination with other labels");
       }
     }
     return null;
   }
 
-  public static ConstantRuleVisibility tryParse(Label label) {
-    if (PUBLIC_LABEL.equals(label) || LEGACY_PUBLIC_LABEL.equals(label)) {
+  private static ConstantRuleVisibility tryParse(Label label) {
+    if (PUBLIC_LABEL.equals(label)) {
       return PUBLIC;
     } else if (PRIVATE_LABEL.equals(label)) {
       return PRIVATE;

@@ -22,13 +22,14 @@ import build.bazel.remote.execution.v2.ExecutionCapabilities;
 import build.bazel.remote.execution.v2.GetCapabilitiesRequest;
 import build.bazel.remote.execution.v2.PriorityCapabilities;
 import build.bazel.remote.execution.v2.PriorityCapabilities.PriorityRange;
+import build.bazel.remote.execution.v2.RequestMetadata;
 import build.bazel.remote.execution.v2.ServerCapabilities;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.remote.common.RemoteActionExecutionContext;
 import com.google.devtools.build.lib.remote.options.RemoteOptions;
 import com.google.devtools.build.lib.remote.util.TracingMetadataUtils;
 import io.grpc.CallCredentials;
-import io.grpc.Context;
 import io.grpc.StatusRuntimeException;
 import java.io.IOException;
 import java.util.List;
@@ -57,31 +58,30 @@ class RemoteServerCapabilities {
     this.retrier = retrier;
   }
 
-  private CapabilitiesBlockingStub capabilitiesBlockingStub() {
+  private CapabilitiesBlockingStub capabilitiesBlockingStub(RemoteActionExecutionContext context) {
     return CapabilitiesGrpc.newBlockingStub(channel)
-        .withInterceptors(TracingMetadataUtils.attachMetadataFromContextInterceptor())
+        .withInterceptors(
+            TracingMetadataUtils.attachMetadataInterceptor(context.getRequestMetadata()))
         .withCallCredentials(callCredentials)
         .withDeadlineAfter(callTimeoutSecs, TimeUnit.SECONDS);
   }
 
   public ServerCapabilities get(String buildRequestId, String commandId)
       throws IOException, InterruptedException {
-    Context withMetadata =
-        TracingMetadataUtils.contextWithMetadata(buildRequestId, commandId, "capabilities");
-    Context previous = withMetadata.attach();
+    RequestMetadata metadata =
+        TracingMetadataUtils.buildMetadata(buildRequestId, commandId, "capabilities", null);
+    RemoteActionExecutionContext context = RemoteActionExecutionContext.create(metadata);
     try {
       GetCapabilitiesRequest request =
           instanceName == null
               ? GetCapabilitiesRequest.getDefaultInstance()
               : GetCapabilitiesRequest.newBuilder().setInstanceName(instanceName).build();
-      return retrier.execute(() -> capabilitiesBlockingStub().getCapabilities(request));
+      return retrier.execute(() -> capabilitiesBlockingStub(context).getCapabilities(request));
     } catch (StatusRuntimeException e) {
       if (e.getCause() instanceof IOException) {
         throw (IOException) e.getCause();
       }
       throw new IOException(e);
-    } finally {
-      withMetadata.detach(previous);
     }
   }
 
@@ -152,14 +152,27 @@ class RemoteServerCapabilities {
     }
   }
 
+  public enum ServerCapabilitiesRequirement {
+    NONE,
+    CACHE,
+    EXECUTION,
+    EXECUTION_AND_CACHE,
+  }
+
   /** Compare the remote server capabilities with those requested by current execution. */
   public static ClientServerCompatibilityStatus checkClientServerCompatibility(
       ServerCapabilities capabilities,
       RemoteOptions remoteOptions,
-      DigestFunction.Value digestFunction) {
+      DigestFunction.Value digestFunction,
+      ServerCapabilitiesRequirement requirement) {
     ClientServerCompatibilityStatus.Builder result = new ClientServerCompatibilityStatus.Builder();
-    boolean remoteExecution = !Strings.isNullOrEmpty(remoteOptions.remoteExecutor);
-    if (!remoteExecution && Strings.isNullOrEmpty(remoteOptions.remoteCache)) {
+    boolean shouldCheckExecutionCapabilities =
+        (requirement == ServerCapabilitiesRequirement.EXECUTION
+            || requirement == ServerCapabilitiesRequirement.EXECUTION_AND_CACHE);
+    boolean shouldCheckCacheCapabilities =
+        (requirement == ServerCapabilitiesRequirement.CACHE
+            || requirement == ServerCapabilitiesRequirement.EXECUTION_AND_CACHE);
+    if (!(shouldCheckCacheCapabilities || shouldCheckExecutionCapabilities)) {
       return result.build();
     }
 
@@ -173,17 +186,7 @@ class RemoteServerCapabilities {
       result.addWarning(st.getMessage());
     }
 
-    // Check cache digest function.
-    CacheCapabilities cacheCap = capabilities.getCacheCapabilities();
-    if (!cacheCap.getDigestFunctionList().contains(digestFunction)) {
-      result.addError(
-          String.format(
-              "Cannot use hash function %s with remote cache. "
-                  + "Server supported functions are: %s",
-              digestFunction, cacheCap.getDigestFunctionList()));
-    }
-
-    if (remoteExecution) {
+    if (shouldCheckExecutionCapabilities) {
       // Check remote execution is enabled.
       ExecutionCapabilities execCap = capabilities.getExecutionCapabilities();
       if (!execCap.getExecEnabled()) {
@@ -206,37 +209,54 @@ class RemoteServerCapabilities {
                 digestFunction, execCap.getDigestFunction()));
       }
 
-      // Check updating remote cache is allowed, if we ever need to do that.
-      if (remoteOptions.remoteLocalFallback
-          && remoteOptions.remoteUploadLocalResults
-          && !cacheCap.getActionCacheUpdateCapabilities().getUpdateEnabled()) {
-        result.addError(
-            "--remote_local_fallback and --remote_upload_local_results are set, "
-                + "but the current account is not authorized to write local results "
-                + "to the remote cache.");
-      }
       // Check execution priority is in the supported range.
       checkPriorityInRange(
           remoteOptions.remoteExecutionPriority,
           "remote_execution_priority",
           execCap.getExecutionPriorityCapabilities(),
           result);
-    } else {
-      // Local execution: check updating remote cache is allowed.
-      if (remoteOptions.remoteUploadLocalResults
-          && !cacheCap.getActionCacheUpdateCapabilities().getUpdateEnabled()) {
-        result.addError(
-            "--remote_upload_local_results is set, but the current account is not authorized "
-                + "to write local results to the remote cache.");
-      }
     }
 
-    // Check result cache priority is in the supported range.
-    checkPriorityInRange(
-        remoteOptions.remoteResultCachePriority,
-        "remote_result_cache_priority",
-        cacheCap.getCachePriorityCapabilities(),
-        result);
+    if (shouldCheckCacheCapabilities) {
+      // Check cache digest function.
+      CacheCapabilities cacheCap = capabilities.getCacheCapabilities();
+      if (!cacheCap.getDigestFunctionList().contains(digestFunction)) {
+        result.addError(
+            String.format(
+                "Cannot use hash function %s with remote cache. "
+                    + "Server supported functions are: %s",
+                digestFunction, cacheCap.getDigestFunctionList()));
+      }
+
+      // Check updating remote cache is allowed, if we ever need to do that.
+      boolean remoteExecution = !Strings.isNullOrEmpty(remoteOptions.remoteExecutor);
+      if (remoteExecution) {
+        if (remoteOptions.remoteLocalFallback
+            && remoteOptions.remoteUploadLocalResults
+            && !cacheCap.getActionCacheUpdateCapabilities().getUpdateEnabled()) {
+          result.addError(
+              "--remote_local_fallback and --remote_upload_local_results are set, "
+                  + "but the current account is not authorized to write local results "
+                  + "to the remote cache.");
+        }
+      } else {
+        // Local execution: check updating remote cache is allowed.
+        if (remoteOptions.remoteUploadLocalResults
+            && !cacheCap.getActionCacheUpdateCapabilities().getUpdateEnabled()) {
+          result.addError(
+              "--remote_upload_local_results is set, but the current account is not authorized "
+                  + "to write local results to the remote cache.");
+        }
+      }
+
+      // Check result cache priority is in the supported range.
+      checkPriorityInRange(
+          remoteOptions.remoteResultCachePriority,
+          "remote_result_cache_priority",
+          cacheCap.getCachePriorityCapabilities(),
+          result);
+    }
+
     return result.build();
   }
 }

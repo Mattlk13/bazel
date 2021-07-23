@@ -29,18 +29,18 @@ import com.google.devtools.build.lib.packages.Type.DictType;
 import com.google.devtools.build.lib.packages.Type.LabelClass;
 import com.google.devtools.build.lib.packages.Type.ListType;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
-import com.google.devtools.build.lib.syntax.EvalException;
-import com.google.devtools.build.lib.syntax.Printer;
-import com.google.devtools.build.lib.syntax.Printer.BasePrinter;
-import com.google.devtools.build.lib.syntax.Starlark;
-import com.google.devtools.build.lib.syntax.StarlarkValue;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import javax.annotation.Nullable;
+import net.starlark.java.eval.EvalException;
+import net.starlark.java.eval.Printer;
+import net.starlark.java.eval.Starlark;
+import net.starlark.java.eval.StarlarkValue;
 
 /**
  * Collection of data types that are specific to building things, i.e. not inherent to Starlark.
@@ -82,7 +82,7 @@ public final class BuildType {
   @AutoCodec public static final Type<License> LICENSE = new LicenseType();
   /** The type of a single distribution. Only used internally, as a type symbol, not a converter. */
   @AutoCodec
-  public static final Type<DistributionType> DISTRIBUTION =
+  static final Type<DistributionType> DISTRIBUTION =
       new Type<DistributionType>() {
         @Override
         public DistributionType cast(Object value) {
@@ -100,7 +100,8 @@ public final class BuildType {
         }
 
         @Override
-        public <T> void visitLabels(LabelVisitor<T> visitor, Object value, T context) {}
+        public void visitLabels(
+            LabelVisitor visitor, DistributionType value, @Nullable Attribute context) {}
 
         @Override
         public String toString() {
@@ -147,7 +148,7 @@ public final class BuildType {
       Type<T> type, Object x, Object what, LabelConversionContext context)
       throws ConversionException {
     if (x instanceof com.google.devtools.build.lib.packages.SelectorList) {
-      return new SelectorList<T>(
+      return new SelectorList<>(
           ((com.google.devtools.build.lib.packages.SelectorList) x).getElements(),
           what,
           context,
@@ -157,8 +158,7 @@ public final class BuildType {
     }
   }
 
-  private static class FilesetEntryType extends
-      Type<FilesetEntry> {
+  private static final class FilesetEntryType extends Type<FilesetEntry> {
     @Override
     public FilesetEntry cast(Object value) {
       return (FilesetEntry) value;
@@ -189,8 +189,8 @@ public final class BuildType {
     }
 
     @Override
-    public <T> void visitLabels(LabelVisitor<T> visitor, Object value, T context) {
-      for (Label label : cast(value).getLabels()) {
+    public void visitLabels(LabelVisitor visitor, FilesetEntry value, @Nullable Attribute context) {
+      for (Label label : value.getLabels()) {
         visitor.visit(label, context);
       }
     }
@@ -200,19 +200,41 @@ public final class BuildType {
   public static class LabelConversionContext {
     private final Label label;
     private final ImmutableMap<RepositoryName, RepositoryName> repositoryMapping;
+    private final HashMap<String, Label> convertedLabelsInPackage;
 
     public LabelConversionContext(
-        Label label, ImmutableMap<RepositoryName, RepositoryName> repositoryMapping) {
+        Label label,
+        ImmutableMap<RepositoryName, RepositoryName> repositoryMapping,
+        HashMap<String, Label> convertedLabelsInPackage) {
       this.label = label;
       this.repositoryMapping = repositoryMapping;
+      this.convertedLabelsInPackage = convertedLabelsInPackage;
     }
 
-    public Label getLabel() {
+    Label getLabel() {
       return label;
     }
 
-    public ImmutableMap<RepositoryName, RepositoryName> getRepositoryMapping() {
+    /** Returns the Label corresponding to the input, using the current conversion context. */
+    public Label convert(String input) throws LabelSyntaxException {
+      // Optimization: First check the package-local map, avoiding Label validation, Label
+      // construction, and global Interner lookup. This approach tends to be very profitable
+      // overall, since it's common for the targets in a single package to have duplicate
+      // label-strings across all their attribute values.
+      Label converted = convertedLabelsInPackage.get(input);
+      if (converted == null) {
+        converted = label.getRelativeWithRemapping(input, repositoryMapping);
+        convertedLabelsInPackage.put(input, converted);
+      }
+      return converted;
+    }
+
+    ImmutableMap<RepositoryName, RepositoryName> getRepositoryMapping() {
       return repositoryMapping;
+    }
+
+    HashMap<String, Label> getConvertedLabelsInPackage() {
+      return convertedLabelsInPackage;
     }
 
     @Override
@@ -239,8 +261,8 @@ public final class BuildType {
     }
 
     @Override
-    public <T> void visitLabels(LabelVisitor<T> visitor, Object value, T context) {
-      visitor.visit(cast(value), context);
+    public void visitLabels(LabelVisitor visitor, Label value, @Nullable Attribute context) {
+      visitor.visit(value, context);
     }
 
     @Override
@@ -276,9 +298,7 @@ public final class BuildType {
           return ((Label) context).getRelativeWithRemapping(str, ImmutableMap.of());
         } else if (context instanceof LabelConversionContext) {
           LabelConversionContext labelConversionContext = (LabelConversionContext) context;
-          return labelConversionContext
-              .getLabel()
-              .getRelativeWithRemapping(str, labelConversionContext.getRepositoryMapping());
+          return labelConversionContext.convert(str);
         } else {
           throw new ConversionException("invalid context '" + context + "' in " + what);
         }
@@ -298,7 +318,7 @@ public final class BuildType {
       super(LABEL, valueType, LabelClass.DEPENDENCY);
     }
 
-    public static <ValueT> LabelKeyedDictType<ValueT> create(Type<ValueT> valueType) {
+    static <ValueT> LabelKeyedDictType<ValueT> create(Type<ValueT> valueType) {
       Preconditions.checkArgument(
           valueType.getLabelClass() == LabelClass.NONE
               || valueType.getLabelClass() == LabelClass.DEPENDENCY,
@@ -322,10 +342,9 @@ public final class BuildType {
       Map<Label, List<Object>> convertedFrom = new LinkedHashMap<>();
       for (Object original : input.keySet()) {
         Label label = LABEL.convert(original, what, context);
-        convertedFrom.computeIfAbsent(label, k -> new ArrayList<Object>());
-        convertedFrom.get(label).add(original);
+        convertedFrom.computeIfAbsent(label, k -> new ArrayList<>()).add(original);
       }
-      BasePrinter errorMessage = Printer.getPrinter();
+      Printer errorMessage = new Printer();
       errorMessage.append("duplicate labels");
       if (what != null) {
         errorMessage.append(" in ").append(what.toString());
@@ -352,11 +371,10 @@ public final class BuildType {
   }
 
   /**
-   * Like Label, LicenseType is a derived type, which is declared specially
-   * in order to allow syntax validation. It represents the licenses, as
-   * described in {@ref License}.
+   * Like Label, LicenseType is a derived type, which is declared specially in order to allow syntax
+   * validation. It represents the licenses, as described in {@link License}.
    */
-  public static class LicenseType extends Type<License> {
+  public static final class LicenseType extends Type<License> {
     @Override
     public License cast(Object value) {
       return (License) value;
@@ -378,8 +396,7 @@ public final class BuildType {
     }
 
     @Override
-    public <T> void visitLabels(LabelVisitor<T> visitor, Object value, T context) {
-    }
+    public void visitLabels(LabelVisitor visitor, License value, @Nullable Attribute context) {}
 
     @Override
     public String toString() {
@@ -388,12 +405,11 @@ public final class BuildType {
   }
 
   /**
-   * Like Label, Distributions is a derived type, which is declared specially
-   * in order to allow syntax validation. It represents the declared distributions
-   * of a target, as described in {@ref License}.
+   * Like Label, Distributions is a derived type, which is declared specially in order to allow
+   * syntax validation. It represents the declared distributions of a target, as described in {@link
+   * License}.
    */
-  private static class Distributions extends
-      Type<Set<DistributionType>> {
+  private static final class Distributions extends Type<Set<DistributionType>> {
     @SuppressWarnings("unchecked")
     @Override
     public Set<DistributionType> cast(Object value) {
@@ -417,8 +433,8 @@ public final class BuildType {
     }
 
     @Override
-    public <T> void visitLabels(LabelVisitor<T> visitor, Object value, T context) {
-    }
+    public void visitLabels(
+        LabelVisitor visitor, Set<DistributionType> value, @Nullable Attribute context) {}
 
     @Override
     public String toString() {
@@ -431,7 +447,7 @@ public final class BuildType {
     }
   }
 
-  private static class OutputType extends Type<Label> {
+  private static final class OutputType extends Type<Label> {
     @Override
     public Label cast(Object value) {
       return (Label) value;
@@ -443,8 +459,8 @@ public final class BuildType {
     }
 
     @Override
-    public <T> void visitLabels(LabelVisitor<T> visitor, Object value, T context) {
-      visitor.visit(cast(value), context);
+    public void visitLabels(LabelVisitor visitor, Label value, @Nullable Attribute context) {
+      visitor.visit(value, context);
     }
 
     @Override
@@ -470,7 +486,7 @@ public final class BuildType {
       try {
         // Enforce value is relative to the context.
         Label currentRule;
-        ImmutableMap<RepositoryName, RepositoryName> repositoryMapping = ImmutableMap.of();
+        ImmutableMap<RepositoryName, RepositoryName> repositoryMapping;
         if (context instanceof LabelConversionContext) {
           currentRule = ((LabelConversionContext) context).getLabel();
           repositoryMapping = ((LabelConversionContext) context).getRepositoryMapping();
@@ -504,7 +520,7 @@ public final class BuildType {
     SelectorList(
         List<Object> x, Object what, @Nullable LabelConversionContext context, Type<T> originalType)
         throws ConversionException {
-      if (x.size() > 1 && originalType.concat(ImmutableList.<T>of()) == null) {
+      if (x.size() > 1 && originalType.concat(ImmutableList.of()) == null) {
         throw new ConversionException(
             String.format("type '%s' doesn't support select concatenation", originalType));
       }
@@ -549,7 +565,7 @@ public final class BuildType {
      */
     public Set<Label> getKeyLabels() {
       ImmutableSet.Builder<Label> keys = ImmutableSet.builder();
-      for (Selector<T> selector : getSelectors()) {
+      for (Selector<T> selector : elements) {
         for (Label label : selector.getEntries().keySet()) {
           if (!Selector.isReservedLabel(label)) {
             keys.add(label);
@@ -566,7 +582,7 @@ public final class BuildType {
 
     @Override
     public void repr(Printer printer) {
-      // Convert to a lib.syntax.SelectorList to guarantee consistency with callers that serialize
+      // Convert to a lib.packages.SelectorList to guarantee consistency with callers that serialize
       // directly on that type.
       List<SelectorValue> selectorValueList = new ArrayList<>();
       for (Selector<T> element : elements) {
@@ -580,6 +596,22 @@ public final class BuildType {
     }
   }
 
+  /** Lazy string message to pass as the {@code what} when converting a select branch value. */
+  private static final class SelectBranchMessage {
+    private final Object what;
+    private final Label key;
+
+    SelectBranchMessage(Object what, Label key) {
+      this.what = what;
+      this.key = key;
+    }
+
+    @Override
+    public String toString() {
+      return String.format("each branch in select expression of %s (including '%s')", what, key);
+    }
+  }
+
   /**
    * Special Type that represents a selector expression for configurable attributes. Holds a
    * mapping of {@code <Label, T>} entries, where keys are configurability patterns and values are
@@ -590,7 +622,7 @@ public final class BuildType {
     @VisibleForTesting
     public static final String DEFAULT_CONDITION_KEY = "//conditions:default";
 
-    public static final Label DEFAULT_CONDITION_LABEL =
+    static final Label DEFAULT_CONDITION_LABEL =
         Label.parseAbsoluteUnchecked(DEFAULT_CONDITION_KEY);
 
     private final Type<T> originalType;
@@ -632,10 +664,7 @@ public final class BuildType {
           result.put(key, originalType.getDefaultValue());
           defaultValuesBuilder.add(key);
         } else {
-          String selectBranch = what == null
-              ? null
-              : String.format("each branch in select expression of %s (including '%s')",
-                  what.toString(), key.toString());
+          Object selectBranch = what == null ? null : new SelectBranchMessage(what, key);
           result.put(key, originalType.convert(entry.getValue(), selectBranch, context));
         }
       }
@@ -733,7 +762,7 @@ public final class BuildType {
    * values 0 (NO), 1 (YES), or None (AUTO). TriState is deprecated; use attr.int(values=[-1, 0, 1])
    * instead.
    */
-  private static class TriStateType extends Type<TriState> {
+  private static final class TriStateType extends Type<TriState> {
     @Override
     public TriState cast(Object value) {
       return (TriState) value;
@@ -745,8 +774,7 @@ public final class BuildType {
     }
 
     @Override
-    public <T> void visitLabels(LabelVisitor<T> visitor, Object value, T context) {
-    }
+    public void visitLabels(LabelVisitor visitor, TriState value, @Nullable Attribute context) {}
 
     @Override
     public String toString() {
@@ -767,7 +795,7 @@ public final class BuildType {
         //       + "instead, use 0 or 1, or None for the default)");
         return ((Boolean) x) ? TriState.YES : TriState.NO;
       }
-      Integer xAsInteger = INTEGER.convert(x, what, context);
+      int xAsInteger = INTEGER.convert(x, what, context).toIntUnchecked();
       if (xAsInteger == -1) {
         return TriState.AUTO;
       } else if (xAsInteger == 1) {

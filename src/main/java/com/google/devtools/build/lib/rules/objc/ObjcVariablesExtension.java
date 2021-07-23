@@ -14,15 +14,16 @@
 
 package com.google.devtools.build.lib.rules.objc;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.IMPORTED_LIBRARY;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.LINKOPT;
 
 import com.google.common.base.Preconditions;
+import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.RuleContext;
-import com.google.devtools.build.lib.analysis.TransitionMode;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainVariables;
@@ -66,7 +67,6 @@ class ObjcVariablesExtension implements VariablesExtension {
 
   private final RuleContext ruleContext;
   private final ObjcProvider objcProvider;
-  private final CompilationArtifacts compilationArtifacts;
   private final Artifact fullyLinkArchive;
   private final IntermediateArtifacts intermediateArtifacts;
   private final BuildConfiguration buildConfiguration;
@@ -84,7 +84,6 @@ class ObjcVariablesExtension implements VariablesExtension {
   private ObjcVariablesExtension(
       RuleContext ruleContext,
       ObjcProvider objcProvider,
-      CompilationArtifacts compilationArtifacts,
       Artifact fullyLinkArchive,
       IntermediateArtifacts intermediateArtifacts,
       BuildConfiguration buildConfiguration,
@@ -100,7 +99,6 @@ class ObjcVariablesExtension implements VariablesExtension {
       boolean arcEnabled) {
     this.ruleContext = ruleContext;
     this.objcProvider = objcProvider;
-    this.compilationArtifacts = compilationArtifacts;
     this.fullyLinkArchive = fullyLinkArchive;
     this.intermediateArtifacts = intermediateArtifacts;
     this.buildConfiguration = buildConfiguration;
@@ -157,10 +155,9 @@ class ObjcVariablesExtension implements VariablesExtension {
 
   private void addPchVariables(CcToolchainVariables.Builder builder) {
     if (ruleContext.attributes().has("pch", BuildType.LABEL)
-        && ruleContext.getPrerequisiteArtifact("pch", TransitionMode.TARGET) != null) {
+        && ruleContext.getPrerequisiteArtifact("pch") != null) {
       builder.addStringVariable(
-          PCH_FILE_VARIABLE_NAME,
-          ruleContext.getPrerequisiteArtifact("pch", TransitionMode.TARGET).getExecPathString());
+          PCH_FILE_VARIABLE_NAME, ruleContext.getPrerequisiteArtifact("pch").getExecPathString());
     }
   }
 
@@ -168,30 +165,39 @@ class ObjcVariablesExtension implements VariablesExtension {
     builder.addStringVariable(
         MODULES_MAPS_DIR_NAME,
         intermediateArtifacts
-            .moduleMap()
+            .swiftModuleMap()
             .getArtifact()
             .getExecPath()
             .getParentDirectory()
             .toString());
     builder.addStringVariable(
         OBJC_MODULE_CACHE_KEY,
-        buildConfiguration.getGenfilesFragment() + "/" + OBJC_MODULE_CACHE_DIR_NAME);
+        buildConfiguration.getGenfilesFragment(ruleContext.getRepository())
+            + "/"
+            + OBJC_MODULE_CACHE_DIR_NAME);
   }
 
   private void addArchiveVariables(CcToolchainVariables.Builder builder) {
     builder.addStringVariable(
         OBJ_LIST_PATH_VARIABLE_NAME,
         intermediateArtifacts.archiveObjList().getExecPathString());
-    builder.addStringVariable(
-        ARCHIVE_PATH_VARIABLE_NAME, compilationArtifacts.getArchive().get().getExecPathString());
   }
 
   private void addFullyLinkArchiveVariables(CcToolchainVariables.Builder builder) {
     builder.addStringVariable(
         FULLY_LINKED_ARCHIVE_PATH_VARIABLE_NAME, fullyLinkArchive.getExecPathString());
+
+    // ObjcProvider.getObjcLibraries contains both libraries from objc providers
+    // as well as those from CcInfo. ObjcProvider.getCcLibraries only contains
+    // those from CcInfo. We have to split these lists to make sure duplicate
+    // libraries are not included in the fully linked archive.
+    ImmutableSet<Artifact> ccLibs = ImmutableSet.copyOf(objcProvider.getCcLibraries());
+    Predicate<Artifact> isNotCcLib = library -> !ccLibs.contains(library);
+    Iterable<Artifact> objcLibraries =
+        objcProvider.getObjcLibraries().stream().filter(isNotCcLib).collect(toImmutableList());
+
     builder.addStringSequenceVariable(
-        OBJC_LIBRARY_EXEC_PATHS_VARIABLE_NAME,
-        Artifact.toExecPaths(objcProvider.getObjcLibraries()));
+        OBJC_LIBRARY_EXEC_PATHS_VARIABLE_NAME, Artifact.toExecPaths(objcLibraries));
     builder.addStringSequenceVariable(
         CC_LIBRARY_EXEC_PATHS_VARIABLE_NAME,
         Artifact.toExecPaths(objcProvider.getCcLibraries()));
@@ -244,7 +250,6 @@ class ObjcVariablesExtension implements VariablesExtension {
   static class Builder {
     private RuleContext ruleContext;
     private ObjcProvider objcProvider;
-    private CompilationArtifacts compilationArtifacts;
     private Artifact fullyLinkArchive;
     private IntermediateArtifacts intermediateArtifacts;
     private BuildConfiguration buildConfiguration;
@@ -270,12 +275,6 @@ class ObjcVariablesExtension implements VariablesExtension {
     /** Sets the {@link ObjcProvider} for this extension. */
     public Builder setObjcProvider(ObjcProvider objcProvider) {
       this.objcProvider = Preconditions.checkNotNull(objcProvider);
-      return this;
-    }
-
-    /** Sets the {@link CompilationArtifacts} for this extension. */
-    public Builder setCompilationArtifacts(CompilationArtifacts compilationArtifacts) {
-      this.compilationArtifacts = Preconditions.checkNotNull(compilationArtifacts);
       return this;
     }
 
@@ -365,9 +364,6 @@ class ObjcVariablesExtension implements VariablesExtension {
       Preconditions.checkNotNull(ruleContext, "missing RuleContext");
       Preconditions.checkNotNull(buildConfiguration, "missing BuildConfiguration");
       Preconditions.checkNotNull(intermediateArtifacts, "missing IntermediateArtifacts");
-      if (activeVariableCategories.contains(VariableCategory.ARCHIVE_VARIABLES)) {
-        Preconditions.checkNotNull(compilationArtifacts, "missing CompilationArtifacts");
-      }
       if (activeVariableCategories.contains(VariableCategory.FULLY_LINK_VARIABLES)) {
         Preconditions.checkNotNull(objcProvider, "missing ObjcProvider");
         Preconditions.checkNotNull(fullyLinkArchive, "missing fully-link archive");
@@ -393,7 +389,6 @@ class ObjcVariablesExtension implements VariablesExtension {
       return new ObjcVariablesExtension(
           ruleContext,
           objcProvider,
-          compilationArtifacts,
           fullyLinkArchive,
           intermediateArtifacts,
           buildConfiguration,

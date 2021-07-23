@@ -25,9 +25,9 @@ import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
 import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider.RuleSet;
 import com.google.devtools.build.lib.analysis.ShellConfiguration;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
-import com.google.devtools.build.lib.analysis.config.ConfigurationFragmentFactory;
 import com.google.devtools.build.lib.analysis.config.CoreOptions;
 import com.google.devtools.build.lib.analysis.config.Fragment;
+import com.google.devtools.build.lib.analysis.config.FragmentClassSet;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
 import com.google.devtools.build.lib.bazel.rules.BazelRuleClassProvider.StrictActionEnvOptions;
 import com.google.devtools.build.lib.packages.RuleClass;
@@ -49,9 +49,10 @@ import org.junit.runners.JUnit4;
  */
 @RunWith(JUnit4.class)
 public class BazelRuleClassProviderTest {
-  private void checkConfigConsistency(ConfiguredRuleClassProvider provider) {
+
+  private static void checkConfigConsistency(ConfiguredRuleClassProvider provider) {
     // Check that every fragment required by a rule is present.
-    Set<Class<? extends Fragment>> configurationFragments = provider.getAllFragments();
+    FragmentClassSet configurationFragments = provider.getAllFragments();
     for (RuleClass ruleClass : provider.getRuleClassMap().values()) {
       for (Class<?> fragment :
           ruleClass.getConfigurationFragmentPolicy().getRequiredConfigurationFragments()) {
@@ -60,17 +61,17 @@ public class BazelRuleClassProviderTest {
     }
 
     List<Class<? extends FragmentOptions>> configOptions = provider.getConfigurationOptions();
-    for (ConfigurationFragmentFactory fragmentFactory : provider.getConfigurationFragments()) {
+    for (Class<? extends Fragment> fragmentClass : provider.getConfigurationFragments()) {
       // Check that every created fragment is present.
-      assertThat(configurationFragments).contains(fragmentFactory.creates());
+      assertThat(configurationFragments).contains(fragmentClass);
       // Check that every options class required for fragment creation is provided.
-      for (Class<? extends FragmentOptions> options : fragmentFactory.requiredOptions()) {
+      for (Class<? extends FragmentOptions> options : Fragment.requiredOptions(fragmentClass)) {
         assertThat(configOptions).contains(options);
       }
     }
   }
 
-  private void checkModule(RuleSet top) {
+  private static void checkModule(RuleSet top) {
     ConfiguredRuleClassProvider.Builder builder = new ConfiguredRuleClassProvider.Builder();
     builder.setToolsRepository(BazelRuleClassProvider.TOOLS_REPOSITORY);
     Set<RuleSet> result = new HashSet<>();
@@ -84,7 +85,7 @@ public class BazelRuleClassProviderTest {
     checkConfigConsistency(provider);
   }
 
-  private void collectTransitiveClosure(Set<RuleSet> result, RuleSet module) {
+  private static void collectTransitiveClosure(Set<RuleSet> result, RuleSet module) {
     if (result.add(module)) {
       for (RuleSet dep : module.requires()) {
         collectTransitiveClosure(result, dep);

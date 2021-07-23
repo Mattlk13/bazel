@@ -19,9 +19,9 @@ import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.devtools.build.lib.actions.ActionAnalysisMetadata.MiddlemanType;
+import com.google.devtools.build.lib.actions.Artifact.ArtifactExpander;
 import com.google.devtools.build.lib.actions.cache.ActionCache;
-import com.google.devtools.build.lib.actions.cache.DigestUtils;
+import com.google.devtools.build.lib.actions.cache.MetadataDigestUtils;
 import com.google.devtools.build.lib.actions.cache.MetadataHandler;
 import com.google.devtools.build.lib.actions.cache.Protos.ActionCacheStatistics.MissReason;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
@@ -54,14 +54,12 @@ import javax.annotation.Nullable;
  * otherwise lightweight, and should be constructed anew and discarded for each build request.
  */
 public class ActionCacheChecker {
-  private static final byte[] EMPTY_DIGEST = new byte[0];
-  private static final FileArtifactValue CONSTANT_METADATA = new ConstantMetadataValue();
-
-  private final ActionCache actionCache;
   private final ActionKeyContext actionKeyContext;
   private final Predicate<? super Action> executionFilter;
   private final ArtifactResolver artifactResolver;
   private final CacheConfig cacheConfig;
+
+  @Nullable private final ActionCache actionCache; // Null when not enabled.
 
   /** Cache config parameters for ActionCacheChecker. */
   @AutoValue
@@ -86,12 +84,11 @@ public class ActionCacheChecker {
   }
 
   public ActionCacheChecker(
-      ActionCache actionCache,
+      @Nullable ActionCache actionCache,
       ArtifactResolver artifactResolver,
       ActionKeyContext actionKeyContext,
       Predicate<? super Action> executionFilter,
       @Nullable CacheConfig cacheConfig) {
-    this.actionCache = actionCache;
     this.executionFilter = executionFilter;
     this.actionKeyContext = actionKeyContext;
     this.artifactResolver = artifactResolver;
@@ -99,6 +96,11 @@ public class ActionCacheChecker {
         cacheConfig != null
             ? cacheConfig
             : CacheConfig.builder().setEnabled(true).setVerboseExplanations(false).build();
+    if (this.cacheConfig.enabled()) {
+      this.actionCache = Preconditions.checkNotNull(actionCache);
+    } else {
+      this.actionCache = null;
+    }
   }
 
   public boolean isActionExecutionProhibited(Action action) {
@@ -159,7 +161,7 @@ public class ActionCacheChecker {
     for (Artifact artifact : actionInputs.toList()) {
       mdMap.put(artifact.getExecPathString(), getMetadataMaybe(metadataHandler, artifact));
     }
-    return !Arrays.equals(DigestUtils.fromMetadata(mdMap), entry.getFileDigest());
+    return !Arrays.equals(MetadataDigestUtils.fromMetadata(mdMap), entry.getFileDigest());
   }
 
   private void reportCommand(EventHandler handler, Action action) {
@@ -238,9 +240,9 @@ public class ActionCacheChecker {
    * <p>The method checks if any of the action's inputs or outputs have changed. Returns a non-null
    * {@link Token} if the action needs to be executed, and null otherwise.
    *
-   * <p>If this method returns non-null, indicating that the action will be executed, the
-   * metadataHandler's {@link MetadataHandler#discardOutputMetadata} method must be called, so that
-   * it does not serve stale metadata for the action's outputs after the action is executed.
+   * <p>If this method returns non-null, indicating that the action will be executed, the {@code
+   * metadataHandler} must have any cached metadata cleared so that it does not serve stale metadata
+   * for the action's outputs after the action is executed.
    */
   // Note: the handler should only be used for DEPCHECKER events; there's no
   // guarantee it will be available for other events.
@@ -250,7 +252,9 @@ public class ActionCacheChecker {
       Map<String, String> clientEnv,
       EventHandler handler,
       MetadataHandler metadataHandler,
-      Map<String, String> remoteDefaultPlatformProperties) {
+      ArtifactExpander artifactExpander,
+      Map<String, String> remoteDefaultPlatformProperties)
+      throws InterruptedException {
     // TODO(bazel-team): (2010) For RunfilesAction/SymlinkAction and similar actions that
     // produce only symlinks we should not check whether inputs are valid at all - all that matters
     // that inputs and outputs are still exist (and new inputs have not appeared). All other checks
@@ -293,6 +297,7 @@ public class ActionCacheChecker {
         entry,
         handler,
         metadataHandler,
+        artifactExpander,
         actionInputs,
         clientEnv,
         remoteDefaultPlatformProperties)) {
@@ -308,14 +313,16 @@ public class ActionCacheChecker {
     return null;
   }
 
-  protected boolean mustExecute(
+  private boolean mustExecute(
       Action action,
       @Nullable ActionCache.Entry entry,
       EventHandler handler,
       MetadataHandler metadataHandler,
+      ArtifactExpander artifactExpander,
       NestedSet<Artifact> actionInputs,
       Map<String, String> clientEnv,
-      Map<String, String> remoteDefaultPlatformProperties) {
+      Map<String, String> remoteDefaultPlatformProperties)
+      throws InterruptedException {
     // Unconditional execution can be applied only for actions that are allowed to be executed.
     if (unconditionalExecution(action)) {
       Preconditions.checkState(action.isVolatile());
@@ -337,16 +344,15 @@ public class ActionCacheChecker {
       reportChanged(handler, action);
       actionCache.accountMiss(MissReason.DIFFERENT_FILES);
       return true;
-    } else if (!entry
-        .getActionKey()
-        .equals(action.getKey(actionKeyContext, /*artifactExpander=*/ null))) {
+    } else if (!entry.getActionKey().equals(action.getKey(actionKeyContext, artifactExpander))) {
       reportCommand(handler, action);
       actionCache.accountMiss(MissReason.DIFFERENT_ACTION_KEY);
       return true;
     }
     Map<String, String> usedEnvironment =
         computeUsedEnv(action, clientEnv, remoteDefaultPlatformProperties);
-    if (!Arrays.equals(entry.getUsedClientEnvDigest(), DigestUtils.fromEnv(usedEnvironment))) {
+    if (!Arrays.equals(
+        entry.getUsedClientEnvDigest(), MetadataDigestUtils.fromEnv(usedEnvironment))) {
       reportClientEnv(handler, action, usedEnvironment);
       actionCache.accountMiss(MissReason.DIFFERENT_ENVIRONMENT);
       return true;
@@ -359,11 +365,10 @@ public class ActionCacheChecker {
 
   private static FileArtifactValue getMetadataOrConstant(
       MetadataHandler metadataHandler, Artifact artifact) throws IOException {
-    if (artifact.isConstantMetadata()) {
-      return CONSTANT_METADATA;
-    } else {
-      return metadataHandler.getMetadata(artifact);
-    }
+    FileArtifactValue metadata = metadataHandler.getMetadata(artifact);
+    return (metadata != null && artifact.isConstantMetadata())
+        ? ConstantMetadataValue.INSTANCE
+        : metadata;
   }
 
   // TODO(ulfjack): It's unclear to me why we're ignoring all IOExceptions. In some cases, we want
@@ -383,9 +388,10 @@ public class ActionCacheChecker {
       Action action,
       Token token,
       MetadataHandler metadataHandler,
+      ArtifactExpander artifactExpander,
       Map<String, String> clientEnv,
       Map<String, String> remoteDefaultPlatformProperties)
-      throws IOException {
+      throws IOException, InterruptedException {
     Preconditions.checkState(
         cacheConfig.enabled(), "cache unexpectedly disabled, action: %s", action);
     Preconditions.checkArgument(token != null, "token unexpectedly null, action: %s", action);
@@ -398,7 +404,7 @@ public class ActionCacheChecker {
         computeUsedEnv(action, clientEnv, remoteDefaultPlatformProperties);
     ActionCache.Entry entry =
         new ActionCache.Entry(
-            action.getKey(actionKeyContext, /*artifactExpander=*/ null),
+            action.getKey(actionKeyContext, artifactExpander),
             usedEnvironment,
             action.discoversInputs());
     for (Artifact output : action.getOutputs()) {
@@ -438,7 +444,7 @@ public class ActionCacheChecker {
 
   @Nullable
   public List<Artifact> getCachedInputs(Action action, PackageRootResolver resolver)
-      throws InterruptedException {
+      throws PackageRootResolver.PackageRootException, InterruptedException {
     ActionCache.Entry entry = getCacheEntry(action);
     if (entry == null || entry.isCorrupted()) {
       return ImmutableList.of();
@@ -510,7 +516,7 @@ public class ActionCacheChecker {
    * when it is different. Whenever it encounters middleman artifacts as input artifacts for other
    * actions, it consults with the aggregated middleman digest computed here.
    */
-  protected void checkMiddlemanAction(
+  private void checkMiddlemanAction(
       Action action, EventHandler handler, MetadataHandler metadataHandler) {
     if (!cacheConfig.enabled()) {
       // Action cache is disabled, don't generate digests.
@@ -539,7 +545,7 @@ public class ActionCacheChecker {
       // Compute the aggregated middleman digest.
       // Since we never validate action key for middlemen, we should not store
       // it in the cache entry and just use empty string instead.
-      entry = new ActionCache.Entry("", ImmutableMap.<String, String>of(), false);
+      entry = new ActionCache.Entry("", ImmutableMap.of(), false);
       for (Artifact input : action.getInputs().toList()) {
         entry.addFile(input.getExecPath(), getMetadataMaybe(metadataHandler, input));
       }
@@ -608,6 +614,13 @@ public class ActionCacheChecker {
 
   private static final class ConstantMetadataValue extends FileArtifactValue
       implements FileArtifactValue.Singleton {
+    static final ConstantMetadataValue INSTANCE = new ConstantMetadataValue();
+    // This needs to not be of length 0, so it is distinguishable from a missing digest when written
+    // into a Fingerprint.
+    private static final byte[] DIGEST = new byte[1];
+
+    private ConstantMetadataValue() {}
+
     @Override
     public FileStateType getType() {
       return FileStateType.REGULAR_FILE;
@@ -615,7 +628,7 @@ public class ActionCacheChecker {
 
     @Override
     public byte[] getDigest() {
-      return EMPTY_DIGEST;
+      return DIGEST;
     }
 
     @Override

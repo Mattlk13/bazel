@@ -55,7 +55,7 @@ public class WorkspaceNameFunctionTest extends BuildViewTestCase {
   @Test
   public void testErrorInExternalPkg() throws Exception {
     reporter.removeHandler(failFastHandler);
-    scratch.overwriteFile("WORKSPACE", "workspace(bad)");
+    scratch.overwriteFile("WORKSPACE", "bad");
     assertThatEvaluationResult(eval())
         .hasErrorEntryForKeyThat(key)
         .hasExceptionThat()
@@ -71,7 +71,8 @@ public class WorkspaceNameFunctionTest extends BuildViewTestCase {
     assertThatEvaluationResult(eval())
         .hasErrorEntryForKeyThat(key)
         .hasExceptionThat()
-        .isInstanceOf(FileSymlinkCycleException.class);
+        .isInstanceOf(NoSuchPackageException.class);
+    assertContainsEvent("circular symlinks detected");
   }
 
   @Test

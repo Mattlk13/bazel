@@ -30,11 +30,15 @@ import com.google.devtools.build.buildjar.javac.plugins.BlazeJavaCompilerPlugin;
 import com.google.devtools.build.buildjar.javac.statistics.BlazeJavacStatistics;
 import com.sun.source.util.JavacTask;
 import com.sun.tools.javac.api.ClientCodeWrapper.Trusted;
+import com.sun.tools.javac.api.JavacTaskImpl;
 import com.sun.tools.javac.api.JavacTool;
 import com.sun.tools.javac.file.CacheFSInfo;
 import com.sun.tools.javac.file.JavacFileManager;
 import com.sun.tools.javac.main.JavaCompiler;
+import com.sun.tools.javac.main.Main.Result;
 import com.sun.tools.javac.util.Context;
+import com.sun.tools.javac.util.Log;
+import com.sun.tools.javac.util.Options;
 import com.sun.tools.javac.util.PropagatedException;
 import java.io.IOError;
 import java.io.IOException;
@@ -47,6 +51,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import javax.tools.Diagnostic;
+import javax.tools.DiagnosticListener;
 import javax.tools.StandardLocation;
 
 /**
@@ -96,8 +101,16 @@ public class BlazeJavacMain {
     Listener diagnosticsBuilder = new Listener(arguments.failFast(), context);
     BlazeJavaCompiler compiler;
 
+    // Initialize parts of context that the filemanager depends on
+    context.put(DiagnosticListener.class, diagnosticsBuilder);
+    Log.instance(context).setWriters(errWriter);
+    Options.instance(context).put("-Xlint:path", "path");
+
     try (JavacFileManager fileManager =
-        new ClassloaderMaskingFileManager(arguments.builtinProcessors())) {
+        new ClassloaderMaskingFileManager(context, arguments.builtinProcessors())) {
+
+      setLocations(fileManager, arguments);
+
       JavacTask task =
           JavacTool.create()
               .getTask(
@@ -108,19 +121,14 @@ public class BlazeJavacMain {
                   /* classes= */ ImmutableList.of(),
                   fileManager.getJavaFileObjectsFromPaths(arguments.sourceFiles()),
                   context);
-      if (arguments.processors() != null) {
-        task.setProcessors(arguments.processors());
-      }
-      fileManager.setContext(context);
-      setLocations(fileManager, arguments);
       try {
-        status = task.call() ? Status.OK : Status.ERROR;
+        status = fromResult(((JavacTaskImpl) task).doCall());
       } catch (PropagatedException e) {
         throw e.getCause();
       }
     } catch (Throwable t) {
       t.printStackTrace(errWriter);
-      status = Status.ERROR;
+      status = Status.CRASH;
     } finally {
       compiler = (BlazeJavaCompiler) JavaCompiler.instance(context);
       if (status == Status.OK) {
@@ -162,6 +170,20 @@ public class BlazeJavacMain {
         errOutput.toString(),
         compiler,
         builder.build());
+  }
+
+  private static Status fromResult(Result result) {
+    switch (result) {
+      case OK:
+        return Status.OK;
+      case ERROR:
+      case CMDERR:
+      case SYSERR:
+        return Status.ERROR;
+      case ABNORMAL:
+        return Status.CRASH;
+    }
+    throw new AssertionError(result);
   }
 
   private static boolean isWerror(WerrorCustomOption werrorCustom, FormattedDiagnostic diagnostic) {
@@ -294,14 +316,8 @@ public class BlazeJavacMain {
 
     private final ImmutableSet<String> builtinProcessors;
 
-    private static Context getContext() {
-      Context context = new Context();
-      CacheFSInfo.preRegister(context);
-      return context;
-    }
-
-    public ClassloaderMaskingFileManager(ImmutableSet<String> builtinProcessors) {
-      super(getContext(), false, UTF_8);
+    public ClassloaderMaskingFileManager(Context context, ImmutableSet<String> builtinProcessors) {
+      super(context, true, UTF_8);
       this.builtinProcessors = builtinProcessors;
     }
 
@@ -317,11 +333,13 @@ public class BlazeJavacMain {
                   || name.startsWith("com.google.common.base.")
                   || name.startsWith("com.google.common.graph.")
                   || name.startsWith("org.checkerframework.shaded.dataflow.")
+                  || name.startsWith("org.checkerframework.errorprone.dataflow.")
                   || name.startsWith("com.sun.source.")
                   || name.startsWith("com.sun.tools.")
                   || name.startsWith("com.google.devtools.build.buildjar.javac.statistics.")
                   || name.startsWith("dagger.model.")
-                  || name.startsWith("dagger.spi.")
+                  // TODO(b/191812726): Include dagger.spi.model before releasing it to SPI users.
+                  || (name.startsWith("dagger.spi.") && !name.startsWith("dagger.spi.model."))
                   || builtinProcessors.contains(name)) {
                 return Class.forName(name);
               }

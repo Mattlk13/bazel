@@ -19,6 +19,7 @@ import com.google.common.util.concurrent.AsyncFunction;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.ConfiguredTargetValue;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.transitions.TransitionFactory;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget;
@@ -30,11 +31,9 @@ import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.pkgcache.PackageManager;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
-import com.google.devtools.build.lib.query2.ConfiguredTargetValueAccessor;
 import com.google.devtools.build.lib.query2.NamedThreadSafeOutputFormatterCallback;
 import com.google.devtools.build.lib.query2.PostAnalysisQueryEnvironment;
 import com.google.devtools.build.lib.query2.SkyQueryEnvironment;
-import com.google.devtools.build.lib.query2.aquery.ActionGraphProtoOutputFormatterCallback.OutputType;
 import com.google.devtools.build.lib.query2.engine.Callback;
 import com.google.devtools.build.lib.query2.engine.InputsFunction;
 import com.google.devtools.build.lib.query2.engine.KeyExtractor;
@@ -46,9 +45,9 @@ import com.google.devtools.build.lib.query2.engine.QueryExpression;
 import com.google.devtools.build.lib.query2.engine.QueryUtil.ThreadSafeMutableKeyExtractorBackedSetImpl;
 import com.google.devtools.build.lib.skyframe.BuildConfigurationValue;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetKey;
-import com.google.devtools.build.lib.skyframe.ConfiguredTargetValue;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
 import com.google.devtools.build.lib.skyframe.actiongraph.v2.StreamedOutputHandler;
+import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.WalkableGraph;
 import java.io.OutputStream;
@@ -80,7 +79,7 @@ public class ActionGraphQueryEnvironment
       Iterable<QueryFunction> extraFunctions,
       TopLevelConfigurations topLevelConfigurations,
       BuildConfiguration hostConfiguration,
-      String parserPrefix,
+      PathFragment parserPrefix,
       PathPackageLocator pkgPath,
       Supplier<WalkableGraph> walkableGraphSupplier,
       Set<Setting> settings) {
@@ -101,7 +100,7 @@ public class ActionGraphQueryEnvironment
                 .build();
     this.accessor =
         new ConfiguredTargetValueAccessor(
-            walkableGraphSupplier.get(), this.configuredTargetKeyExtractor);
+            walkableGraphSupplier.get(), this::getTarget, this.configuredTargetKeyExtractor);
   }
 
   public ActionGraphQueryEnvironment(
@@ -110,7 +109,7 @@ public class ActionGraphQueryEnvironment
       Iterable<QueryFunction> extraFunctions,
       TopLevelConfigurations topLevelConfigurations,
       BuildConfiguration hostConfiguration,
-      String parserPrefix,
+      PathFragment parserPrefix,
       PathPackageLocator pkgPath,
       Supplier<WalkableGraph> walkableGraphSupplier,
       AqueryOptions aqueryOptions) {
@@ -150,61 +149,35 @@ public class ActionGraphQueryEnvironment
           BuildConfiguration hostConfiguration,
           @Nullable TransitionFactory<Rule> trimmingTransitionFactory,
           PackageManager packageManager) {
-    return aqueryOptions.protoV2
-        ? ImmutableList.of(
-            new ActionGraphProtoV2OutputFormatterCallback(
-                eventHandler,
-                aqueryOptions,
-                out,
-                skyframeExecutor,
-                accessor,
-                StreamedOutputHandler.OutputType.BINARY,
-                actionFilters),
-            new ActionGraphProtoV2OutputFormatterCallback(
-                eventHandler,
-                aqueryOptions,
-                out,
-                skyframeExecutor,
-                accessor,
-                StreamedOutputHandler.OutputType.TEXT,
-                actionFilters),
-            new ActionGraphProtoV2OutputFormatterCallback(
-                eventHandler,
-                aqueryOptions,
-                out,
-                skyframeExecutor,
-                accessor,
-                StreamedOutputHandler.OutputType.JSON,
-                actionFilters),
-            new ActionGraphTextOutputFormatterCallback(
-                eventHandler, aqueryOptions, out, skyframeExecutor, accessor, actionFilters))
-        : ImmutableList.of(
-            new ActionGraphProtoOutputFormatterCallback(
-                eventHandler,
-                aqueryOptions,
-                out,
-                skyframeExecutor,
-                accessor,
-                OutputType.BINARY,
-                actionFilters),
-            new ActionGraphProtoOutputFormatterCallback(
-                eventHandler,
-                aqueryOptions,
-                out,
-                skyframeExecutor,
-                accessor,
-                OutputType.TEXT,
-                actionFilters),
-            new ActionGraphProtoOutputFormatterCallback(
-                eventHandler,
-                aqueryOptions,
-                out,
-                skyframeExecutor,
-                accessor,
-                OutputType.JSON,
-                actionFilters),
-            new ActionGraphTextOutputFormatterCallback(
-                eventHandler, aqueryOptions, out, skyframeExecutor, accessor, actionFilters));
+    return ImmutableList.of(
+        new ActionGraphProtoOutputFormatterCallback(
+            eventHandler,
+            aqueryOptions,
+            out,
+            skyframeExecutor,
+            accessor,
+            StreamedOutputHandler.OutputType.BINARY,
+            actionFilters),
+        new ActionGraphProtoOutputFormatterCallback(
+            eventHandler,
+            aqueryOptions,
+            out,
+            skyframeExecutor,
+            accessor,
+            StreamedOutputHandler.OutputType.TEXT,
+            actionFilters),
+        new ActionGraphProtoOutputFormatterCallback(
+            eventHandler,
+            aqueryOptions,
+            out,
+            skyframeExecutor,
+            accessor,
+            StreamedOutputHandler.OutputType.JSON,
+            actionFilters),
+        new ActionGraphTextOutputFormatterCallback(
+            eventHandler, aqueryOptions, out, skyframeExecutor, accessor, actionFilters),
+        new ActionGraphSummaryOutputFormatterCallback(
+            eventHandler, aqueryOptions, out, skyframeExecutor, accessor, actionFilters));
   }
 
   @Override
@@ -313,7 +286,7 @@ public class ActionGraphQueryEnvironment
       patternToEval = getPattern(pattern);
     } catch (TargetParsingException tpe) {
       try {
-        reportBuildFileError(owner, tpe.getMessage());
+        handleError(owner, tpe.getMessage(), tpe.getDetailedExitCode());
       } catch (QueryException qe) {
         return immediateFailedFuture(qe);
       }
@@ -322,35 +295,31 @@ public class ActionGraphQueryEnvironment
 
     AsyncFunction<TargetParsingException, Void> reportBuildFileErrorAsyncFunction =
         exn -> {
-          reportBuildFileError(owner, exn.getMessage());
+          handleError(owner, exn.getMessage(), exn.getDetailedExitCode());
           return Futures.immediateFuture(null);
         };
-    try {
-      return QueryTaskFutureImpl.ofDelegate(
-          Futures.catchingAsync(
-              patternToEval.evalAdaptedForAsync(
-                  resolver,
-                  getIgnoredPackagePrefixesPathFragments(),
-                  /* excludedSubdirectories= */ ImmutableSet.of(),
-                  (Callback<Target>)
-                      partialResult -> {
-                        List<ConfiguredTargetValue> transformedResult = new ArrayList<>();
-                        for (Target target : partialResult) {
-                          ConfiguredTargetValue configuredTargetValue =
-                              getConfiguredTargetValue(target.getLabel());
-                          if (configuredTargetValue != null) {
-                            transformedResult.add(configuredTargetValue);
-                          }
+    return QueryTaskFutureImpl.ofDelegate(
+        Futures.catchingAsync(
+            patternToEval.evalAdaptedForAsync(
+                resolver,
+                getIgnoredPackagePrefixesPathFragments(),
+                /*excludedSubdirectories=*/ ImmutableSet.of(),
+                (Callback<Target>)
+                    partialResult -> {
+                      List<ConfiguredTargetValue> transformedResult = new ArrayList<>();
+                      for (Target target : partialResult) {
+                        ConfiguredTargetValue configuredTargetValue =
+                            getConfiguredTargetValue(target.getLabel());
+                        if (configuredTargetValue != null) {
+                          transformedResult.add(configuredTargetValue);
                         }
-                        callback.process(transformedResult);
-                      },
-                  QueryException.class),
-              TargetParsingException.class,
-              reportBuildFileErrorAsyncFunction,
-              MoreExecutors.directExecutor()));
-    } catch (InterruptedException e) {
-      return immediateCancelledFuture();
-    }
+                      }
+                      callback.process(transformedResult);
+                    },
+                QueryException.class),
+            TargetParsingException.class,
+            reportBuildFileErrorAsyncFunction,
+            MoreExecutors.directExecutor()));
   }
 
   private ConfiguredTargetValue getConfiguredTargetValue(Label label) throws InterruptedException {

@@ -18,6 +18,7 @@ import static com.google.devtools.build.lib.bazel.repository.downloader.Download
 import static com.google.devtools.build.lib.bazel.repository.downloader.HttpParser.readHttpRequest;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 
@@ -25,10 +26,10 @@ import com.google.common.base.Optional;
 import com.google.devtools.build.lib.bazel.repository.cache.RepositoryCache;
 import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.lib.vfs.DigestHashFunction;
-import com.google.devtools.build.lib.vfs.DigestHashFunction.DefaultHashFunctionNotSetException;
 import com.google.devtools.build.lib.vfs.JavaIoFileSystem;
 import com.google.devtools.build.lib.vfs.Path;
 import java.io.DataInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.ServerSocket;
@@ -42,6 +43,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import org.junit.After;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -66,13 +68,8 @@ public class HttpDownloaderTest {
   private final ExtendedEventHandler eventHandler = mock(ExtendedEventHandler.class);
   private final JavaIoFileSystem fs;
 
-  public HttpDownloaderTest() throws DefaultHashFunctionNotSetException {
-    try {
-      DigestHashFunction.setDefault(DigestHashFunction.SHA256);
-    } catch (DigestHashFunction.DefaultAlreadySetException e) {
-      // Do nothing.
-    }
-    fs = new JavaIoFileSystem();
+  public HttpDownloaderTest() {
+    fs = new JavaIoFileSystem(DigestHashFunction.SHA256);
 
     // Scale timeouts down to make tests fast.
     httpDownloader.setTimeoutScaling(0.1f);
@@ -186,6 +183,7 @@ public class HttpDownloaderTest {
     }
   }
 
+  @Ignore("b/182150157")
   @Test
   public void downloadFrom2UrlsFirstSocketTimeoutOnBodyReadSecondOk()
       throws IOException, InterruptedException {
@@ -252,6 +250,7 @@ public class HttpDownloaderTest {
     }
   }
 
+  @Ignore("b/182150157")
   @Test
   public void downloadFrom2UrlsBothSocketTimeoutDuringBodyRead()
       throws IOException, InterruptedException {
@@ -335,5 +334,70 @@ public class HttpDownloaderTest {
     }
 
     return data;
+  }
+
+  @Test
+  public void downloadAndReadOneUrl_ok() throws IOException, InterruptedException {
+    try (ServerSocket server = new ServerSocket(0, 1, InetAddress.getByName(null))) {
+      @SuppressWarnings("unused")
+      Future<?> possiblyIgnoredError =
+          executor.submit(
+              () -> {
+                try (Socket socket = server.accept()) {
+                  readHttpRequest(socket.getInputStream());
+                  sendLines(
+                      socket,
+                      "HTTP/1.1 200 OK",
+                      "Date: Fri, 31 Dec 1999 23:59:59 GMT",
+                      "Connection: close",
+                      "Content-Type: text/plain",
+                      "Content-Length: 5",
+                      "",
+                      "hello");
+                }
+                return null;
+              });
+
+      assertThat(
+              new String(
+                  httpDownloader.downloadAndReadOneUrl(
+                      new URL(String.format("http://localhost:%d/foo", server.getLocalPort())),
+                      eventHandler,
+                      Collections.emptyMap()),
+                  UTF_8))
+          .isEqualTo("hello");
+    }
+  }
+
+  @Test
+  public void downloadAndReadOneUrl_notFound() throws IOException, InterruptedException {
+    try (ServerSocket server = new ServerSocket(0, 1, InetAddress.getByName(null))) {
+      @SuppressWarnings("unused")
+      Future<?> possiblyIgnoredError =
+          executor.submit(
+              () -> {
+                try (Socket socket = server.accept()) {
+                  readHttpRequest(socket.getInputStream());
+                  sendLines(
+                      socket,
+                      "HTTP/1.1 404 Not Found",
+                      "Date: Fri, 31 Dec 1999 23:59:59 GMT",
+                      "Connection: close",
+                      "Content-Type: text/plain",
+                      "Content-Length: 5",
+                      "",
+                      "");
+                }
+                return null;
+              });
+
+      assertThrows(
+          FileNotFoundException.class,
+          () ->
+              httpDownloader.downloadAndReadOneUrl(
+                  new URL(String.format("http://localhost:%d/foo", server.getLocalPort())),
+                  eventHandler,
+                  Collections.emptyMap()));
+    }
   }
 }

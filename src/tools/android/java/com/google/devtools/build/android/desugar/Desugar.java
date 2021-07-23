@@ -18,6 +18,7 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.devtools.build.android.desugar.LambdaClassMaker.LAMBDA_METAFACTORY_DUMPER_PROPERTY;
+import static com.google.devtools.build.android.desugar.retarget.ReplacementRange.DESUGAR_JAVA8_CORE_LIBS;
 import static com.google.devtools.build.android.desugar.retarget.ReplacementRange.DESUGAR_JAVA8_LIBS;
 import static com.google.devtools.build.android.desugar.retarget.ReplacementRange.REPLACE_CALLS_TO_LONG_UNSIGNED;
 import static com.google.devtools.build.android.desugar.retarget.ReplacementRange.REPLACE_CALLS_TO_PRIMITIVE_WRAPPERS;
@@ -89,7 +90,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.objectweb.asm.Attribute;
@@ -153,15 +153,21 @@ public class Desugar {
     ImmutableSet.Builder<ReplacementRange> invocationReplacementRangesBuilder =
         ImmutableSet.builder();
 
-    if (!allowCallsToLongUnsigned) {
+    // Exclude the dependency on desugar runtime libs from desugar_jdk_libs.
+    if (!allowCallsToLongUnsigned && !this.options.coreLibrary) {
       invocationReplacementRangesBuilder.add(REPLACE_CALLS_TO_LONG_UNSIGNED);
     }
-    if (!allowCallsToPrimitiveWrappers) {
+    // Exclude the dependency on desugar runtime libs from desugar_jdk_libs.
+    if (!allowCallsToPrimitiveWrappers && !this.options.coreLibrary) {
       invocationReplacementRangesBuilder.add(REPLACE_CALLS_TO_PRIMITIVE_WRAPPERS);
     }
 
     if (options.desugarCoreLibs && options.autoDesugarShadowedApiUse) {
       invocationReplacementRangesBuilder.add(DESUGAR_JAVA8_LIBS);
+    }
+
+    if (options.coreLibrary) {
+      invocationReplacementRangesBuilder.add(DESUGAR_JAVA8_CORE_LIBS);
     }
 
     enabledInvocationReplacementRanges = invocationReplacementRangesBuilder.build();
@@ -220,8 +226,8 @@ public class Desugar {
 
     ClassMemberRetargetConfig classMemberRetargetConfig =
         ClassMemberRetargetConfig.builder()
-            .setInvocationReplacementConfigUrl(ClassMemberRetargetConfig.DEFAULT_PROTO_URL)
-            .setEnabledInvocationReplacementRanges(enabledInvocationReplacementRanges)
+            .addInvocationReplacementConfigUrl(ClassMemberRetargetConfig.DEFAULT_PROTO_URL)
+            .addAllEnabledInvocationReplacementRange(enabledInvocationReplacementRanges)
             .build();
 
     try (Closer closer = Closer.create()) {
@@ -295,8 +301,8 @@ public class Desugar {
                   loader,
                   options.rewriteCoreLibraryPrefixes,
                   options.emulateCoreLibraryInterfaces,
-                  options.retargetCoreLibraryMembers,
-                  options.dontTouchCoreLibraryMembers)
+                  options.dontTouchCoreLibraryMembers,
+                  classMemberRetargetConfig)
               : null;
 
       InvocationSiteTransformationRecordBuilder callSiteTransCollector =
@@ -500,9 +506,8 @@ public class Desugar {
         Iterables.concat(inputFiles.toInputFileStreams(), nestDigest.getCompanionFileProviders())) {
       String inputFilename = inputFileProvider.getBinaryPathName();
       if ("module-info.class".equals(inputFilename)
-          || (inputFilename.endsWith("/module-info.class")
-              && Pattern.matches("META-INF/versions/[0-9]+/module-info.class", inputFilename))) {
-        continue; // Drop module-info.class since it has no meaning on Android
+          || inputFilename.startsWith("META-INF/versions/")) {
+        continue; // drop module-info.class and META-INF/versions/ since d8 will drop them anyway
       }
       if (OutputFileProvider.DESUGAR_DEPS_FILENAME.equals(inputFilename)) {
         // TODO(kmb): rule out that this happens or merge input file with what's in depsCollector
@@ -784,7 +789,13 @@ public class Desugar {
     // instructions in generated lambda classes (checkState below will fail)
     visitor =
         new LambdaDesugaring(
-            visitor, loader, lambdas, null, ImmutableSet.of(), allowDefaultMethods);
+            visitor,
+            loader,
+            lambdas,
+            null,
+            ImmutableSet.of(),
+            classAttributeRecord,
+            allowDefaultMethods);
     return visitor;
   }
 
@@ -866,6 +877,7 @@ public class Desugar {
                 lambdas,
                 interfaceLambdaMethodCollector,
                 methodsUsedInInvokeDynamics,
+                classAttributeRecord,
                 allowDefaultMethods);
       }
     }

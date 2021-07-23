@@ -34,11 +34,14 @@ public class AutoRegistry {
   private static final Supplier<ObjectCodecRegistry> SUPPLIER =
       Suppliers.memoize(AutoRegistry::create);
 
-  /* Common ancestor of common.google.devtools.build and com.google.devtools.common.options,
-   * where Tristate lives. */
-  private static final String PACKAGE_PREFIX = "com.google.devtools";
+  // Build codecs only for Bazel and Starlark classes.
+  private static boolean packageFilter(String name) {
+    return name.startsWith("com.google.devtools.build")
+        || name.startsWith("com.google.devtools.common.options") // e.g. for Tristate
+        || name.startsWith("net.starlark.java");
+  }
 
-  /** Class name prefixes to blacklist for {@link DynamicCodec}. */
+  /** Class name prefixes to forbid for {@link DynamicCodec}. */
   private static final ImmutableList<String> CLASS_NAME_PREFIX_BLACKLIST =
       ImmutableList.of(
           "com.google.devtools.build.lib.google",
@@ -78,7 +81,8 @@ public class AutoRegistry {
 
   private static ObjectCodecRegistry create() {
     try {
-      ObjectCodecRegistry.Builder registry = CodecScanner.initializeCodecRegistry(PACKAGE_PREFIX);
+      ObjectCodecRegistry.Builder registry =
+          CodecScanner.initializeCodecRegistry(AutoRegistry::packageFilter);
       for (String className : EXTERNAL_CLASS_NAMES_TO_REGISTER) {
         registry.addClassName(className);
       }
@@ -86,7 +90,7 @@ public class AutoRegistry {
         registry.addReferenceConstant(constant);
       }
       for (String classNamePrefix : CLASS_NAME_PREFIX_BLACKLIST) {
-        registry.blacklistClassNamePrefix(classNamePrefix);
+        registry.excludeClassNamePrefix(classNamePrefix);
       }
       return registry.build();
     } catch (IOException | ReflectiveOperationException e) {

@@ -15,17 +15,13 @@ package com.google.devtools.build.lib.buildtool;
 
 import com.google.devtools.build.lib.buildtool.util.GoogleBuildIntegrationTestCase;
 import com.google.devtools.build.lib.skyframe.MutableSupplier;
-import com.google.devtools.build.lib.testutil.Suite;
-import com.google.devtools.build.lib.testutil.TestSpec;
 import com.google.devtools.build.lib.unix.UnixFileSystem;
-import com.google.devtools.build.lib.vfs.DigestHashFunction;
 import com.google.devtools.build.lib.vfs.FileStatus;
 import com.google.devtools.build.lib.vfs.FileSystem;
-import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.vfs.PathFragment;
 import java.io.IOException;
 
 /** Abstract test class for tests that want to be aware of filesystem operations. */
-@TestSpec(size = Suite.MEDIUM_TESTS)
 public abstract class IoHookTestCase extends GoogleBuildIntegrationTestCase {
 
   /** Type of path operation. */
@@ -46,13 +42,10 @@ public abstract class IoHookTestCase extends GoogleBuildIntegrationTestCase {
 
   /** Listens for file operations. */
   protected interface FileListener {
-    void handle(PathOp op, Path path) throws IOException;
+    void handle(PathOp op, PathFragment path) throws IOException;
   }
 
-  private static final FileListener DUMMY_LISTENER = new FileListener() {
-    @Override
-    public void handle(PathOp op, Path path) {}
-  };
+  private static final FileListener DUMMY_LISTENER = (op, path) -> {};
 
   private MutableSupplier<FileListener> listener = new MutableSupplier<>();
 
@@ -63,33 +56,35 @@ public abstract class IoHookTestCase extends GoogleBuildIntegrationTestCase {
   @Override
   protected FileSystem createFileSystem() {
     setListener(DUMMY_LISTENER);
-    return new UnixFileSystem(DigestHashFunction.getDefaultUnchecked()) {
+    return new UnixFileSystem(getDigestHashFunction(), /*hashAttributeName=*/ "") {
       @Override
-      protected void chmod(Path path, int chmod) throws IOException {
+      protected void chmod(PathFragment path, int chmod) throws IOException {
         listener.get().handle(PathOp.CHMOD, path);
         super.chmod(path, chmod);
       }
 
       @Override
-      protected FileStatus statIfFound(Path path, boolean followSymlinks) throws IOException {
+      protected FileStatus statIfFound(PathFragment path, boolean followSymlinks)
+          throws IOException {
         listener.get().handle(PathOp.STAT, path);
         return super.statIfFound(path, followSymlinks);
       }
 
       @Override
-      protected UnixFileStatus statInternal(Path path, boolean followSymlinks) throws IOException {
+      protected UnixFileStatus statInternal(PathFragment path, boolean followSymlinks)
+          throws IOException {
         listener.get().handle(PathOp.STAT, path);
         return super.statInternal(path, followSymlinks);
       }
 
       @Override
-      protected byte[] getDigest(Path path) throws IOException {
+      protected byte[] getDigest(PathFragment path) throws IOException {
         listener.get().handle(PathOp.MD5_DIGEST, path);
         return super.getDigest(path);
       }
 
       @Override
-      protected byte[] getFastDigest(Path path) throws IOException {
+      protected byte[] getFastDigest(PathFragment path) throws IOException {
         listener.get().handle(PathOp.FAST_DIGEST, path);
         // Importantly, listener.get().handle(PathOp.MD5_DIGEST, path) is not called here.
         return fastDigest ? super.getDigest(path) : null;

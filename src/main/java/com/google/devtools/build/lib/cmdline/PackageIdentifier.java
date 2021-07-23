@@ -44,12 +44,12 @@ public final class PackageIdentifier implements Comparable<PackageIdentifier>, S
 
   @AutoCodec.Instantiator
   public static PackageIdentifier create(RepositoryName repository, PathFragment pkgName) {
-    // Note: We rely on these being interned to fast-path Label#equals.
+    // Note: We rely on these being (weakly) interned to fast-path Label#equals.
     return INTERNER.intern(new PackageIdentifier(repository, pkgName));
   }
 
-  public static final PackageIdentifier EMPTY_PACKAGE_ID = createInMainRepo(
-      PathFragment.EMPTY_FRAGMENT);
+  public static final PackageIdentifier EMPTY_PACKAGE_ID =
+      createInMainRepo(PathFragment.EMPTY_FRAGMENT);
 
   public static PackageIdentifier createInMainRepo(String name) {
     return createInMainRepo(PathFragment.create(name));
@@ -72,17 +72,15 @@ public final class PackageIdentifier implements Comparable<PackageIdentifier>, S
    *
    * In this case, this method returns a package identifier for foo/bar, even though that is not a
    * package. Callers need to look up the actual package if needed.
-   *
-   * @throws LabelSyntaxException if the exec path seems to be for an external repository that does
-   *     not have a valid repository name (see {@link RepositoryName#create})
    */
   public static PackageIdentifier discoverFromExecPath(
       PathFragment execPath, boolean forFiles, boolean siblingRepositoryLayout) {
     Preconditions.checkArgument(!execPath.isAbsolute(), execPath);
-    PathFragment tofind = forFiles
-        ? Preconditions.checkNotNull(
-            execPath.getParentDirectory(), "Must pass in files, not root directory")
-        : execPath;
+    PathFragment tofind =
+        forFiles
+            ? Preconditions.checkNotNull(
+                execPath.getParentDirectory(), "Must pass in files, not root directory")
+            : execPath;
     PathFragment prefix =
         siblingRepositoryLayout
             ? LabelConstants.EXPERIMENTAL_EXTERNAL_PATH_PREFIX
@@ -98,8 +96,7 @@ public final class PackageIdentifier implements Comparable<PackageIdentifier>, S
   }
 
   /**
-   * The identifier for this repository. This is either "" or prefixed with an "@",
-   * e.g., "@myrepo".
+   * The identifier for this repository. This is either "" or prefixed with an "@", e.g., "@myrepo".
    */
   private final RepositoryName repository;
 
@@ -107,9 +104,9 @@ public final class PackageIdentifier implements Comparable<PackageIdentifier>, S
   private final PathFragment pkgName;
 
   /**
-   * Precomputed hash code. Hash/equality is based on repository and pkgName. Note that due to
-   * interning, x.equals(y) <=> x==y.
-   **/
+   * Precomputed hash code. Hash/equality is based on repository and pkgName. Note that due to weak
+   * interning, x.equals(y) usually implies x==y.
+   */
   private final int hashCode;
 
   private PackageIdentifier(RepositoryName repository, PathFragment pkgName) {
@@ -170,11 +167,24 @@ public final class PackageIdentifier implements Comparable<PackageIdentifier>, S
   }
 
   /**
-   * Returns a relative path to the source code for this package. Returns pkgName if this is in the
-   * main repository or external/[repository name]/[pkgName] if not.
+   * Returns a path to the source code for this package relative to the corresponding source root.
+   * Returns pkgName for all repositories.
    */
   public PathFragment getSourceRoot() {
-    return repository.getSourceRoot().getRelative(pkgName);
+    return pkgName;
+  }
+
+  /**
+   * Returns the package path fragment to derived artifacts for this package. Returns pkgName if
+   * this is in the main repository or siblingRepositoryLayout is true. Otherwise, returns
+   * external/[repository name]/[pkgName].
+   */
+  public PathFragment getPackagePath(boolean siblingRepositoryLayout) {
+    return repository.isDefault() || repository.isMain() || siblingRepositoryLayout
+        ? pkgName
+        : LabelConstants.EXTERNAL_PATH_PREFIX
+            .getRelative(repository.strippedName())
+            .getRelative(pkgName);
   }
 
   public PathFragment getExecPath(boolean siblingRepositoryLayout) {
@@ -197,12 +207,18 @@ public final class PackageIdentifier implements Comparable<PackageIdentifier>, S
     return create(RepositoryName.MAIN, pkgName);
   }
 
+  /** Returns the package in label syntax format. */
+  public String getCanonicalForm() {
+    String repository = getRepository().getCanonicalForm();
+    return repository + "//" + getPackageFragment();
+  }
+
   /**
    * Returns the name of this package.
    *
    * <p>There are certain places that expect the path fragment as the package name ('foo/bar') as a
    * package identifier. This isn't specific enough for packages in other repositories, so their
-   * stringified version is '@baz//foo/bar'.</p>
+   * stringified version is '@baz//foo/bar'.
    */
   @Override
   public String toString() {
@@ -218,7 +234,8 @@ public final class PackageIdentifier implements Comparable<PackageIdentifier>, S
       return false;
     }
     PackageIdentifier that = (PackageIdentifier) object;
-    return this.hashCode == that.hashCode && pkgName.equals(that.pkgName)
+    return this.hashCode == that.hashCode
+        && pkgName.equals(that.pkgName)
         && repository.equals(that.repository);
   }
 

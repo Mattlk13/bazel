@@ -13,8 +13,8 @@
 // limitations under the License.
 package com.google.devtools.build.lib.buildtool;
 
+import com.github.benmanes.caffeine.cache.CaffeineSpec;
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.cache.CacheBuilderSpec;
 import com.google.common.flogger.GoogleLogger;
 import com.google.devtools.build.lib.actions.LocalHostCapacity;
 import com.google.devtools.build.lib.util.OptionsUtils;
@@ -22,7 +22,7 @@ import com.google.devtools.build.lib.util.ResourceConverter;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.common.options.BoolOrEnumConverter;
 import com.google.devtools.common.options.Converters;
-import com.google.devtools.common.options.Converters.CacheBuilderSpecConverter;
+import com.google.devtools.common.options.Converters.CaffeineSpecConverter;
 import com.google.devtools.common.options.Converters.RangeConverter;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDefinition;
@@ -59,10 +59,11 @@ public class BuildRequestOptions extends OptionsBase {
       effectTags = {OptionEffectTag.HOST_MACHINE_RESOURCE_OPTIMIZATIONS, OptionEffectTag.EXECUTION},
       converter = JobsConverter.class,
       help =
-          "The number of concurrent jobs to run. Takes {@value FLAG_SYNTAX}. Values must be"
-              + " between 1 and"
+          "The number of concurrent jobs to run. Takes "
+              + ResourceConverter.FLAG_SYNTAX
+              + ". Values must be between 1 and "
               + MAX_JOBS
-              + " values above "
+              + ". Values above "
               + JOBS_TOO_HIGH_WARNING
               + " may cause memory issues. \"auto\" calculates a reasonable default based on"
               + " host resources.")
@@ -116,9 +117,10 @@ public class BuildRequestOptions extends OptionsBase {
       documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
       effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS, OptionEffectTag.AFFECTS_OUTPUTS},
       help =
-          "Execute the analysis phase; this is the usual behaviour. Specifying --noanalyze causes "
-              + "the build to stop before starting the analysis phase, returning zero iff the "
-              + "package loading completed successfully; this mode is useful for testing.")
+          "Execute the loading/analysis phase; this is the usual behaviour. Specifying --noanalyze"
+              + "causes the build to stop before starting the loading/analysis phase, just doing "
+              + "target pattern parsing and returning zero iff that completed successfully; this "
+              + "mode is useful for testing.")
   public boolean performAnalysisPhase;
 
   @Option(
@@ -141,19 +143,38 @@ public class BuildRequestOptions extends OptionsBase {
       effectTags = {OptionEffectTag.EXECUTION, OptionEffectTag.AFFECTS_OUTPUTS},
       defaultValue = "null",
       help =
-          "Specifies which output groups of the top-level targets to build. If omitted, a default "
-              + "set of output groups are built. When specified the default set is overridden. "
-              + "However you may use --output_groups=+<output_group> or "
-              + "--output_groups=-<output_group> to instead modify the set of output groups.")
+          "A list of comma-separated output group names, each of which optionally prefixed by a +"
+              + " or a -. A group prefixed by + is added to the default set of output groups,"
+              + " while a group prefixed by - is removed from the default set. If at least one"
+              + " group is not prefixed, the default set of output groups is omitted. For example,"
+              + " --output_groups=+foo,+bar builds the union of the default set, foo, and bar,"
+              + " while --output_groups=foo,bar overrides the default set such that only foo and"
+              + " bar are built.")
   public List<String> outputGroups;
 
   @Option(
       name = "experimental_run_validations",
-      defaultValue = "false",
+      defaultValue = "true",
+      documentationCategory = OptionDocumentationCategory.OUTPUT_SELECTION,
+      effectTags = {OptionEffectTag.EXECUTION, OptionEffectTag.AFFECTS_OUTPUTS},
+      help = "Use --run_validations instead.")
+  public boolean experimentalRunValidationActions;
+
+  @Option(
+      name = "run_validations",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.OUTPUT_SELECTION,
       effectTags = {OptionEffectTag.EXECUTION, OptionEffectTag.AFFECTS_OUTPUTS},
       help = "Whether to run validation actions as part of the build.")
   public boolean runValidationActions;
+
+  @Option(
+      name = "experimental_use_validation_aspect",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.OUTPUT_SELECTION,
+      effectTags = {OptionEffectTag.EXECUTION, OptionEffectTag.AFFECTS_OUTPUTS},
+      help = "Whether to run validation actions using aspect (for parallelism with tests).")
+  public boolean useValidationAspect;
 
   @Option(
       name = "show_result",
@@ -270,11 +291,11 @@ public class BuildRequestOptions extends OptionsBase {
       defaultValue = "maximumSize=100000",
       documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
       effectTags = {OptionEffectTag.EXECUTION},
-      converter = CacheBuilderSpecConverter.class,
+      converter = CaffeineSpecConverter.class,
       help =
           "Describes the cache used to store known regular directories as they're created. Parent"
               + " directories of output files are created on-demand during action execution.")
-  public CacheBuilderSpec directoryCreationCacheSpec;
+  public CaffeineSpec directoryCreationCacheSpec;
 
   @Option(
       name = "aspects",
@@ -404,17 +425,6 @@ public class BuildRequestOptions extends OptionsBase {
   public boolean incompatibleSkipGenfilesSymlink;
 
   @Option(
-      name = "experimental_nested_set_as_skykey_threshold",
-      defaultValue = "0",
-      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
-      metadataTags = OptionMetadataTag.EXPERIMENTAL,
-      effectTags = {OptionEffectTag.EXECUTION, OptionEffectTag.LOSES_INCREMENTAL_STATE},
-      help =
-          "If this flag is set with a non-zero value, NestedSets whose size exceeds the threshold"
-              + " will be evaluated as a unit on Skyframe.")
-  public int nestedSetAsSkyKeyThreshold;
-
-  @Option(
       name = "experimental_use_fork_join_pool",
       defaultValue = "false",
       documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
@@ -464,15 +474,29 @@ public class BuildRequestOptions extends OptionsBase {
   public int fsvcThreads;
 
   @Option(
-      name = "experimental_no_product_name_out_symlink",
-      defaultValue = "false",
+      name = "experimental_aquery_dump_after_build_format",
+      defaultValue = "null",
       documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
-      metadataTags = OptionMetadataTag.EXPERIMENTAL,
-      effectTags = {OptionEffectTag.EXECUTION},
+      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
       help =
-          "If this flag is set to true, the <product>-out symlink will not be created if "
-              + "--symlink_prefix is used.")
-  public boolean experimentalNoProductNameOutSymlink;
+          "Writes the state of Skyframe (which includes previous invocations on this blaze"
+              + " instance as well) to stdout after a build, in the same format as aquery's."
+              + " Possible formats: proto|textproto|jsonproto.")
+  @Nullable
+  public String aqueryDumpAfterBuildFormat;
+
+  @Option(
+      name = "experimental_aquery_dump_after_build_output_file",
+      defaultValue = "null",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
+      converter = OptionsUtils.PathFragmentConverter.class,
+      help =
+          "Specify the output file for the aquery dump after a build. Use in conjunction with"
+              + " --experimental_aquery_dump_after_build_format. The path provided is relative to"
+              + " Bazel's output base, unless it's an absolute path.")
+  @Nullable
+  public PathFragment aqueryDumpAfterBuildOutputFile;
 
   /**
    * Converter for jobs: Takes keyword ({@value #FLAG_SYNTAX}). Values must be between 1 and
